@@ -1,7 +1,8 @@
 # m45
 
-Scaffold for a personal assistant with continuity (planned product name: Pleiades).
-Project version: **0.1.0**. There is no application, data model, or product feature yet.
+Early implementation of a personal assistant with continuity (planned product name:
+Pleiades). Project version: **0.1.0**. The Python package and typed settings exist;
+there is no data model or product feature yet.
 
 ## Local setup
 
@@ -28,7 +29,7 @@ docker compose down
 The named `postgres_data` volume survives `docker compose down`. Adding `--volumes`
 deletes it. PostgreSQL initialization variables apply only to a fresh volume;
 changing `.env` does not change credentials in an existing database. There are no
-application tables or migrations in this scaffold.
+application tables or migrations yet.
 
 ## Checks
 
@@ -37,11 +38,9 @@ starting containers, checks formatting and lint with Ruff, checks types with
 Pyright, and invokes pytest. GitHub Actions runs this same command. A running
 database, `.env`, and model credentials are not required for checks.
 
-There are deliberately no placeholder tests. While the repository has no Python
-code, Ruff/Pyright have no code to check and pytest collects no tests. The script
-explicitly accepts only pytest's "no tests collected" exit code in addition to
-success; all other failures propagate. Remove that scaffold exception when the
-first implementation and tests are added.
+There are deliberately no placeholder tests. Pytest currently collects no tests,
+so the script temporarily accepts its "no tests collected" exit code; all other
+failures propagate. Remove that exception when the first implementation tests land.
 
 Dependency changes belong in `pyproject.toml` and `uv.lock` together. Use `uv lock`
 after editing dependencies; checks use `--locked` so they cannot silently rewrite
@@ -50,19 +49,20 @@ the dependency resolution. Tool settings live in `pyproject.toml`.
 ## Implementation boundary
 
 SQLAlchemy, Psycopg, Alembic, and Pydantic Settings are installed and locked.
-Application settings validation, standard-library console logging, SQLAlchemy
-engines/models, and Alembic's migration environment need Python code and are
-intentionally not implemented yet. `DATABASE_URL` and `LOG_LEVEL` document the
-initial configuration inputs; no runtime consumes them yet.
+`src/m45/config.py` validates `DATABASE_URL` and `LOG_LEVEL` from the environment
+or `.env` when settings are instantiated. No database connection is made yet.
+Application logging, SQLAlchemy engines/models, and Alembic's migration
+environment will be added with the behavior that needs them.
 
 LangGraph configuration and dependencies will be added with an actual graph
 entry point. There is no development server, frontend, model integration, or
-background process in this scaffold. Implementation begins after scaffold review.
+background process yet.
 
 ## Repository map
 
 | Path | Current responsibility and dependency | Effect of removing it |
 | --- | --- | --- |
+| `src/m45/` | Importable application package and typed settings. | Application imports and settings validation fail. |
 | `scripts/check.sh` | Canonical checks, used locally and by CI. | Removes the shared verification entry point. |
 | `.github/workflows/check.yml` | Runs the check script on pushes and pull requests. | Removes automated CI checks. |
 | `pyproject.toml` | Project metadata, dependency declarations, and tool settings. | uv and checks lose their project configuration. |
@@ -80,5 +80,5 @@ rules, current scope, architecture invariants, and historical vision respectivel
 The abandoned live WhatsApp integration in the historical notes is not current scope.
 
 Generated `.venv/`, `.ruff_cache/`, and `.pytest_cache/` are disposable local tooling
-state. There are no empty `src/`, `tests/`, or migration directories. Git's `.git/`
-directory holds repository history and is unrelated to application structure.
+state. There are no `tests/` or migration directories yet. Git's `.git/` directory
+holds repository history and is unrelated to application structure.

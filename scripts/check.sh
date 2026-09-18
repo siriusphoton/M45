@@ -12,10 +12,10 @@ uv run --no-sync pyright
 status=0
 uv run --no-sync pytest || status=$?
 
-# Scaffold only: remove this exception when the first implementation/tests land.
+# Temporary: remove this exception when the first implementation tests land.
 # Every other pytest failure remains a failure of this script.
 if [[ "$status" -eq 5 ]]; then
-    echo "Scaffold only: pytest collected no tests; no application code exists yet."
+    echo "Pytest collected no tests yet."
     exit 0
 fi
 
