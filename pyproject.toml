@@ -18,10 +18,6 @@ dev = [
     "ruff>=0.15,<1",
 ]
 
-[tool.uv]
-# There is no application package to build or install at the scaffold stage.
-package = false
-
 [tool.ruff]
 target-version = "py312"
 line-length = 100
@@ -37,3 +33,7 @@ venv = ".venv"
 
 [tool.pytest.ini_options]
 addopts = ["--strict-config", "--strict-markers", "--import-mode=importlib"]
+
+[build-system]
+requires = ["uv_build>=0.11.2,<0.12"]
+build-backend = "uv_build"
