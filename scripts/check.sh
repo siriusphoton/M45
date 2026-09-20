@@ -3,20 +3,33 @@ set -euo pipefail
 
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
+compose=(
+    docker compose
+    --env-file .env.example
+    --profile test
+)
+test_database_url="postgresql+psycopg://m45:m45@127.0.0.1:5433/m45_test"
+
+cleanup_test_database() {
+    "${compose[@]}" rm --stop --force postgres_test >/dev/null 2>&1 || true
+}
+
+trap cleanup_test_database EXIT
+
 uv sync --locked
-docker compose --env-file .env.example config --quiet
+"${compose[@]}" config --quiet
 uv run --no-sync ruff format --check .
 uv run --no-sync ruff check .
 uv run --no-sync pyright
 
-status=0
-uv run --no-sync pytest || status=$?
+cleanup_test_database
+"${compose[@]}" up --detach --wait postgres_test
 
-# Temporary: remove this exception when the first implementation tests land.
-# Every other pytest failure remains a failure of this script.
-if [[ "$status" -eq 5 ]]; then
-    echo "Pytest collected no tests yet."
-    exit 0
-fi
+DATABASE_URL="$test_database_url" \
+    uv run --no-sync alembic upgrade head
 
-exit "$status"
+DATABASE_URL="$test_database_url" \
+    uv run --no-sync alembic check
+
+DATABASE_URL="$test_database_url" \
+    uv run --no-sync pytest

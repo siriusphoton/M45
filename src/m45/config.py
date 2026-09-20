@@ -9,3 +9,8 @@ class Settings(BaseSettings):
 
     database_url: PostgresDsn
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
+
+def load_settings() -> Settings:
+    """Load and validate settings from environment sources."""
+    return Settings()  # pyright: ignore[reportCallIssue]

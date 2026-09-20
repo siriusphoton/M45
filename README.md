@@ -1,84 +1,97 @@
 # m45
 
-Early implementation of a personal assistant with continuity (planned product name:
-Pleiades). Project version: **0.1.0**. The Python package and typed settings exist;
-there is no data model or product feature yet.
+Early implementation of a personal assistant with continuity (planned product
+name: Pleiades). The project is currently version **0.1.0**.
+
+The current increment provides PostgreSQL-backed durable source-message history.
+The LangGraph assistant, model integration, and user interface have not been
+implemented yet.
 
 ## Local setup
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) (CI uses
-0.11.2) and Docker with Compose. Python 3.12 is selected by `.python-version`;
-uv can install it if needed.
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Docker
+with Compose. Python 3.12 is selected by `.python-version`.
 
 ```sh
 uv sync --locked
 cp -n .env.example .env
 docker compose up -d --wait postgres
-./scripts/check.sh
+uv run alembic upgrade head
 ```
 
-PostgreSQL 17 listens on `127.0.0.1:5432`. The example credentials are for local
-development. If that port is occupied by another project, change `POSTGRES_PORT`
-in `.env` and update the port in `DATABASE_URL` to match.
+The development database listens on `127.0.0.1:5432` by default. If that port is
+occupied, change `POSTGRES_PORT` and the port in `DATABASE_URL` together in
+`.env`.
+
+To inspect or stop the development database:
 
 ```sh
 docker compose exec postgres psql -U m45 -d m45
 docker compose down
 ```
 
-The named `postgres_data` volume survives `docker compose down`. Adding `--volumes`
-deletes it. PostgreSQL initialization variables apply only to a fresh volume;
-changing `.env` does not change credentials in an existing database. There are no
-application tables or migrations yet.
+The `postgres_data` volume survives `docker compose down`. Adding `--volumes`
+deletes it. PostgreSQL initialization variables only affect a fresh volume.
 
 ## Checks
 
-`./scripts/check.sh` synchronizes the locked environment, validates Compose without
-starting containers, checks formatting and lint with Ruff, checks types with
-Pyright, and invokes pytest. GitHub Actions runs this same command. A running
-database, `.env`, and model credentials are not required for checks.
+Run the canonical check command:
 
-There are deliberately no placeholder tests. Pytest currently collects no tests,
-so the script temporarily accepts its "no tests collected" exit code; all other
-failures propagate. Remove that exception when the first implementation tests land.
+```sh
+./scripts/check.sh
+```
 
-Dependency changes belong in `pyproject.toml` and `uv.lock` together. Use `uv lock`
-after editing dependencies; checks use `--locked` so they cannot silently rewrite
-the dependency resolution. Tool settings live in `pyproject.toml`.
+It:
 
-## Implementation boundary
+1. synchronizes the locked Python environment;
+2. validates the Compose configuration;
+3. runs Ruff formatting and lint checks;
+4. runs Pyright;
+5. creates a fresh ephemeral PostgreSQL test database;
+6. applies all Alembic migrations;
+7. checks that migrations match SQLAlchemy metadata;
+8. runs pytest;
+9. removes the test database container.
 
-SQLAlchemy, Psycopg, Alembic, and Pydantic Settings are installed and locked.
-`src/m45/config.py` validates `DATABASE_URL` and `LOG_LEVEL` from the environment
-or `.env` when settings are instantiated. No database connection is made yet.
-Application logging, SQLAlchemy engines/models, and Alembic's migration
-environment will be added with the behavior that needs them.
+The check does not use the development database or require `.env`. GitHub Actions
+runs the same command.
 
-LangGraph configuration and dependencies will be added with an actual graph
-entry point. There is no development server, frontend, model integration, or
-background process yet.
+Dependency changes belong in `pyproject.toml` and `uv.lock` together. Checks use
+`uv sync --locked`, so dependency resolution cannot change silently.
+
+## Current implementation
+
+`source_messages` stores durable text messages using the source, conversation ID,
+and source message ID as its unique identity.
+
+Capturing an exact duplicate returns the existing row. Reusing an identity with a
+different role or content raises an explicit conflict. Distinct message IDs remain
+distinct even when their text is identical.
+
+Transaction ownership belongs to the caller. Source capture executes within the
+provided SQLAlchemy session but does not commit it.
+
+There is no LangGraph graph, checkpoint configuration, model integration,
+frontend integration, Discord adapter, importer, or long-term-memory mechanism
+yet.
 
 ## Repository map
 
-| Path | Current responsibility and dependency | Effect of removing it |
+| Path | Responsibility | Effect of removing it |
 | --- | --- | --- |
-| `src/m45/` | Importable application package and typed settings. | Application imports and settings validation fail. |
-| `scripts/check.sh` | Canonical checks, used locally and by CI. | Removes the shared verification entry point. |
-| `.github/workflows/check.yml` | Runs the check script on pushes and pull requests. | Removes automated CI checks. |
-| `pyproject.toml` | Project metadata, dependency declarations, and tool settings. | uv and checks lose their project configuration. |
-| `uv.lock` | Exact dependency resolution used by `uv sync --locked`. | Locked setup and checks fail until regenerated. |
-| `.python-version` | Selects Python 3.12 for uv locally and in CI. | Interpreter selection falls back to the project constraint and environment. |
-| `compose.yaml` | Local PostgreSQL, health check, localhost port, and named storage. | Compose setup and configuration checks fail; the existing volume is not deleted. |
-| `.env.example` | Local configuration template, also used by Compose validation in checks. | Documented setup and Compose validation fail. |
-| `.gitignore` | Excludes secrets, environments, generated artifacts, and existing local notes. | Those files can appear as untracked and be accidentally committed. |
-| `README.md` | Setup, scope, and this walkthrough; referenced by project metadata. | Removes onboarding and leaves the metadata reference unresolved. |
+| `src/m45/` | Application package, typed configuration, database setup, and source-history persistence. | Application imports and persistence behavior fail. |
+| `migrations/` | Alembic environment and versioned PostgreSQL schema changes. | Fresh and existing databases cannot be brought to the expected schema. |
+| `tests/` | PostgreSQL integration tests for source capture and identity semantics. | The persistence contract loses automated verification. |
+| `scripts/check.sh` | Canonical local and CI verification workflow. | Local and CI checks no longer share one entry point. |
+| `.github/workflows/check.yml` | Runs the canonical checks on pushes and pull requests. | Automated repository checks stop. |
+| `pyproject.toml` | Project metadata, dependencies, and Python tool configuration. | uv and the configured development tools lose their project definition. |
+| `uv.lock` | Exact dependency resolution. | Reproducible locked installation fails until regenerated. |
+| `alembic.ini` | Alembic script and logging configuration. | Alembic commands lose their repository configuration. |
+| `compose.yaml` | Durable development PostgreSQL and ephemeral test PostgreSQL services. | Local database setup and database-backed checks fail. |
+| `.env.example` | Local configuration template and canonical test-service values. | Documented setup and Compose checks lose required values. |
+| `.gitignore` | Excludes secrets, runtime state, caches, and private data. | Sensitive or generated files can appear as commit candidates. |
+| `.python-version` | Selects Python 3.12 for local uv commands. | Interpreter selection falls back to the environment and project constraint. |
+| `README.md` | Documents setup, checks, current behavior, and repository ownership. | Onboarding is lost and package builds lose their declared readme. |
 
-Existing `AGENTS.md`, `PROJECT.md`, `ARCHITECTURE.md`, and
-`docs/archive/Thoughts.md` are local project context, kept untracked by the existing
-repository policy. They have no runtime dependencies; removing them loses working
-rules, current scope, architecture invariants, and historical vision respectively.
-The abandoned live WhatsApp integration in the historical notes is not current scope.
-
-Generated `.venv/`, `.ruff_cache/`, and `.pytest_cache/` are disposable local tooling
-state. There are no `tests/` or migration directories yet. Git's `.git/` directory
-holds repository history and is unrelated to application structure.
+`AGENTS.md`, `PROJECT.md`, `ARCHITECTURE.md`, and `docs/` are local project context
+excluded by the repository’s existing Git policy.
