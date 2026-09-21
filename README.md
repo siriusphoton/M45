@@ -4,9 +4,10 @@ Early implementation of a personal assistant with continuity (planned product
 name: Pleiades). The project is currently version **0.1.0**.
 
 The current increment provides PostgreSQL-backed durable source-message history,
-a bounded reader for recent context from other conversations, and a deterministic
-LangGraph smoke agent served through the local Agent Server. Production model,
-memory-injection, source-capture, and user-interface wiring are still in progress.
+a bounded reader for recent context from other conversations, and a configurable
+LangGraph agent served through the local Agent Server. Ollama Cloud has been
+verified through Agent Chat UI; source capture and memory injection are still in
+progress.
 
 ## Local setup
 
@@ -36,7 +37,8 @@ deletes it. PostgreSQL initialization variables only affect a fresh volume.
 
 ## Local Agent Server
 
-Start the credential-free smoke agent:
+Set `MODEL_PROVIDER` and its corresponding credential in `.env`, then start the
+agent:
 
 ```sh
 ./scripts/dev.sh
@@ -48,9 +50,15 @@ tracing. The development server supplies thread checkpointing and saves its
 disposable local state under `.langgraph_api/`; application graph code does not
 create a checkpointer.
 
-The smoke agent always returns `m45 smoke response`. It exists to validate graph
-loading, message identity, repeated invocation, and server-owned thread state
-without model credentials. It is not the product model path.
+The runtime supports `google_genai` and `ollama` through LangChain's native chat
+model integrations. Each provider keeps its own configured model name, so changing
+`MODEL_PROVIDER` selects the complete provider profile. Ollama Cloud has been
+verified with two turns in Agent Chat UI, including server-owned thread history.
+The Google Gemini API path is configured and type-checked but has not yet completed
+a live request because the selected free-tier model was at capacity.
+
+Automated tests use a deterministic fake chat model directly; it is not selectable
+as an application provider.
 
 ## Checks
 
@@ -95,27 +103,28 @@ explicitly eligible sources, excludes the current conversation, and applies
 configurable message and character limits. It returns the selected window in
 chronological order.
 
-`create_smoke_agent` builds a real compiled LangGraph agent with LangChain's
-credential-free fake chat model. The module-level `graph` export is loaded by
-Agent Server. Automated tests cover repeated invocations and distinct generated
-assistant-message IDs; a manual server smoke test has also confirmed that two
-runs on one thread produce a checkpointed four-message history.
+`create_application_agent` builds the real LangGraph agent with the configured
+Google GenAI or Ollama chat model. `runtime.py` loads typed settings and exports
+the compiled graph that Agent Server imports once. `create_deterministic_test_agent`
+provides the credential-free model used by automated tests. Tests cover repeated
+invocations, distinct generated assistant-message IDs, and clear failures for a
+missing selected-provider credential.
 
 Prompt injection has not been implemented yet. The selected window will later be
 supplied transiently through native agent middleware rather than appended to
 persisted thread messages.
 
-There is no production model integration, source-history capture in the graph,
-personal-context middleware, frontend integration, Discord adapter, importer, or
-long-term-memory mechanism yet.
+There is no source-history capture in the graph, personal-context middleware,
+Discord adapter, importer, or long-term-memory mechanism yet. Agent Chat UI is
+the currently verified replaceable frontend.
 
 ## Repository map
 
 | Path | Responsibility | Effect of removing it |
 | --- | --- | --- |
-| `src/m45/` | Application package, typed configuration, database setup, source-history persistence, recent-context selection, and the LangGraph smoke agent. | Application imports, persistence, context selection, and graph loading fail. |
+| `src/m45/` | Application package, typed configuration, database setup, source-history persistence, recent-context selection, provider-backed agent construction, and the Agent Server runtime export. | Application imports, persistence, context selection, model construction, and graph loading fail. |
 | `migrations/` | Alembic environment and versioned PostgreSQL schema changes. | Fresh and existing databases cannot be brought to the expected schema. |
-| `tests/` | Tests for source identity, recent-context selection, and repeatable smoke-agent behavior. | Persistence, context-selection, and graph-runtime contracts lose automated verification. |
+| `tests/` | Tests for source identity, recent-context selection, deterministic agent behavior, and provider credential validation. | Persistence, context-selection, and graph-runtime contracts lose automated verification. |
 | `scripts/check.sh` | Canonical local and CI verification workflow. | Local and CI checks no longer share one entry point. |
 | `scripts/dev.sh` | Canonical local Agent Server launcher with tracing and CLI analytics disabled. | Developers must reconstruct the correct privacy-preserving server command. |
 | `.github/workflows/check.yml` | Runs the canonical checks on pushes and pull requests. | Automated repository checks stop. |

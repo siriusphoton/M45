@@ -1,7 +1,8 @@
 {
     "python_version": "3.12",
     "dependencies": ["."],
+    "env": ".env",
     "graphs": {
-        "m45": "./src/m45/agent.py:graph"
+        "m45": "./src/m45/runtime.py:graph"
     }
 }
