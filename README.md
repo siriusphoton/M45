@@ -3,9 +3,9 @@
 Early implementation of a personal assistant with continuity (planned product
 name: Pleiades). The project is currently version **0.1.0**.
 
-The current increment provides PostgreSQL-backed durable source-message history.
-The LangGraph assistant, model integration, and user interface have not been
-implemented yet.
+The current increment provides PostgreSQL-backed durable source-message history
+and a bounded reader for recent context from other conversations. The LangGraph
+assistant, model integration, and user interface have not been implemented yet.
 
 ## Local setup
 
@@ -71,6 +71,15 @@ distinct even when their text is identical.
 Transaction ownership belongs to the caller. Source capture executes within the
 provided SQLAlchemy session but does not commit it.
 
+`load_recent_personal_context` selects whole user and assistant messages from
+explicitly eligible sources, excludes the current conversation, and applies
+configurable message and character limits. It returns the selected window in
+chronological order.
+
+Prompt injection has not been implemented yet. The selected window will later be
+supplied transiently through native agent middleware rather than appended to
+persisted thread messages.
+
 There is no LangGraph graph, checkpoint configuration, model integration,
 frontend integration, Discord adapter, importer, or long-term-memory mechanism
 yet.
@@ -79,16 +88,16 @@ yet.
 
 | Path | Responsibility | Effect of removing it |
 | --- | --- | --- |
-| `src/m45/` | Application package, typed configuration, database setup, and source-history persistence. | Application imports and persistence behavior fail. |
+| `src/m45/` | Application package, typed configuration, database setup, source-history persistence, and recent-context selection. | Application imports, persistence, and context selection fail. |
 | `migrations/` | Alembic environment and versioned PostgreSQL schema changes. | Fresh and existing databases cannot be brought to the expected schema. |
-| `tests/` | PostgreSQL integration tests for source capture and identity semantics. | The persistence contract loses automated verification. |
+| `tests/` | PostgreSQL integration tests for source identity and recent-context selection. | The persistence and context-selection contracts lose automated verification. |
 | `scripts/check.sh` | Canonical local and CI verification workflow. | Local and CI checks no longer share one entry point. |
 | `.github/workflows/check.yml` | Runs the canonical checks on pushes and pull requests. | Automated repository checks stop. |
 | `pyproject.toml` | Project metadata, dependencies, and Python tool configuration. | uv and the configured development tools lose their project definition. |
 | `uv.lock` | Exact dependency resolution. | Reproducible locked installation fails until regenerated. |
 | `alembic.ini` | Alembic script and logging configuration. | Alembic commands lose their repository configuration. |
 | `compose.yaml` | Durable development PostgreSQL and ephemeral test PostgreSQL services. | Local database setup and database-backed checks fail. |
-| `.env.example` | Local configuration template and canonical test-service values. | Documented setup and Compose checks lose required values. |
+| `.env.example` | Local configuration template, context-window defaults, and canonical test-service values. | Documented setup and Compose checks lose required values. |
 | `.gitignore` | Excludes secrets, runtime state, caches, and private data. | Sensitive or generated files can appear as commit candidates. |
 | `.python-version` | Selects Python 3.12 for local uv commands. | Interpreter selection falls back to the environment and project constraint. |
 | `README.md` | Documents setup, checks, current behavior, and repository ownership. | Onboarding is lost and package builds lose their declared readme. |

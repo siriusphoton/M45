@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import PostgresDsn
+from pydantic import PositiveInt, PostgresDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,6 +9,9 @@ class Settings(BaseSettings):
 
     database_url: PostgresDsn
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
+    personal_context_message_limit: PositiveInt = 20
+    personal_context_character_limit: PositiveInt = 12_000
 
 
 def load_settings() -> Settings:
