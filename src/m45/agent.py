@@ -8,7 +8,13 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.runnables import Runnable
 from pydantic import SecretStr
+from sqlalchemy import Engine
 
+from m45.agent_middleware import (
+    AGENT_CHAT_UI_SOURCE,
+    PersonalContextMiddleware,
+    SourceHistoryMiddleware,
+)
 from m45.config import Settings
 
 type AgentGraph = Runnable[InputAgentState, OutputAgentState[Any]]
@@ -58,13 +64,23 @@ def create_configured_chat_model(settings: Settings) -> BaseChatModel:
     )
 
 
-def create_application_agent(settings: Settings) -> AgentGraph:
+def create_application_agent(settings: Settings, engine: Engine) -> AgentGraph:
     model = create_configured_chat_model(settings)
 
     return create_agent(  # pyright: ignore[reportUnknownVariableType]
         model=model,
         tools=[],
         system_prompt=APPLICATION_SYSTEM_PROMPT,
+        middleware=[
+            SourceHistoryMiddleware(engine, source=AGENT_CHAT_UI_SOURCE),
+            PersonalContextMiddleware(
+                engine,
+                source=AGENT_CHAT_UI_SOURCE,
+                eligible_sources=(AGENT_CHAT_UI_SOURCE,),
+                message_limit=settings.personal_context_message_limit,
+                character_limit=settings.personal_context_character_limit,
+            ),
+        ],
         name="m45",
     )
 

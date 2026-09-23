@@ -6,8 +6,10 @@ name: Pleiades). The project is currently version **0.1.0**.
 The current increment provides PostgreSQL-backed durable source-message history,
 a bounded reader for recent context from other conversations, and a configurable
 LangGraph agent served through the local Agent Server. Ollama Cloud has been
-verified through Agent Chat UI; source capture and memory injection are still in
-progress.
+verified through Agent Chat UI, including recall across two separate threads and
+the corresponding durable source rows. Native agent middleware captures each
+completed turn and supplies recent cross-conversation context to the model without
+adding that context to checkpointed thread messages.
 
 ## Local setup
 
@@ -103,20 +105,29 @@ explicitly eligible sources, excludes the current conversation, and applies
 configurable message and character limits. It returns the selected window in
 chronological order.
 
+`SourceHistoryMiddleware` commits the submitted user message before model
+invocation and the completed assistant message before the graph returns. It uses
+the LangGraph thread ID as the source conversation identity and requires stable
+message IDs. Exact re-execution remains safe through the source-history
+idempotency contract.
+
+`PersonalContextMiddleware` loads the bounded window at the model-call boundary,
+formats it as a role-labelled transcript with synthetic conversation labels, and
+adds it to that model request's system message. The injected transcript is not
+added to agent state or checkpoint history. Raw source IDs and capture timestamps
+remain database provenance rather than prompt content.
+
 `create_application_agent` builds the real LangGraph agent with the configured
 Google GenAI or Ollama chat model. `runtime.py` loads typed settings and exports
 the compiled graph that Agent Server imports once. `create_deterministic_test_agent`
 provides the credential-free model used by automated tests. Tests cover repeated
 invocations, distinct generated assistant-message IDs, and clear failures for a
-missing selected-provider credential.
+missing selected-provider credential. The middleware integration test separately
+observes the actual model input, saved checkpoint messages, and durable source
+rows for one complete turn.
 
-Prompt injection has not been implemented yet. The selected window will later be
-supplied transiently through native agent middleware rather than appended to
-persisted thread messages.
-
-There is no source-history capture in the graph, personal-context middleware,
-Discord adapter, importer, or long-term-memory mechanism yet. Agent Chat UI is
-the currently verified replaceable frontend.
+There is no Discord adapter, importer, or long-term-memory mechanism yet. Agent
+Chat UI is the currently verified replaceable frontend.
 
 ## Repository map
 
@@ -124,7 +135,7 @@ the currently verified replaceable frontend.
 | --- | --- | --- |
 | `src/m45/` | Application package, typed configuration, database setup, source-history persistence, recent-context selection, provider-backed agent construction, and the Agent Server runtime export. | Application imports, persistence, context selection, model construction, and graph loading fail. |
 | `migrations/` | Alembic environment and versioned PostgreSQL schema changes. | Fresh and existing databases cannot be brought to the expected schema. |
-| `tests/` | Tests for source identity, recent-context selection, deterministic agent behavior, and provider credential validation. | Persistence, context-selection, and graph-runtime contracts lose automated verification. |
+| `tests/` | Tests for source identity, recent-context selection and formatting, middleware boundaries, deterministic agent behavior, and provider credential validation. | Persistence, context-selection, model-input, checkpoint, source-capture, and graph-runtime contracts lose automated verification. |
 | `scripts/check.sh` | Canonical local and CI verification workflow. | Local and CI checks no longer share one entry point. |
 | `scripts/dev.sh` | Canonical local Agent Server launcher with tracing and CLI analytics disabled. | Developers must reconstruct the correct privacy-preserving server command. |
 | `.github/workflows/check.yml` | Runs the canonical checks on pushes and pull requests. | Automated repository checks stop. |
