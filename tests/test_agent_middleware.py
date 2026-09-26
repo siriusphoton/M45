@@ -21,6 +21,7 @@ from m45.agent_middleware import (
     PersonalContextMiddleware,
     SourceHistoryMiddleware,
 )
+from m45.interaction import InteractionContext
 from m45.source_history import SourceMessage, capture_source_message
 
 TEST_SOURCE = "agent_middleware_test"
@@ -30,6 +31,7 @@ TEST_CONVERSATION_IDS = (
     OTHER_CONVERSATION_ID,
     CURRENT_CONVERSATION_ID,
 )
+EXPLICIT_CONTEXT_THREAD_ID = "middleware-context-checkpoint-thread"
 
 
 class ModelInputRecorder(BaseCallbackHandler):
@@ -84,9 +86,29 @@ def seeded_personal_context(engine: Engine) -> Iterator[None]:
             )
 
 
+@pytest.mark.parametrize(
+    ("thread_id", "interaction_context"),
+    [
+        pytest.param(
+            CURRENT_CONVERSATION_ID,
+            None,
+            id="agent-chat-ui-fallback",
+        ),
+        pytest.param(
+            EXPLICIT_CONTEXT_THREAD_ID,
+            InteractionContext(
+                source=TEST_SOURCE,
+                conversation_id=CURRENT_CONVERSATION_ID,
+            ),
+            id="explicit-runtime-context",
+        ),
+    ],
+)
 def test_agent_captures_turn_and_injects_context_without_checkpointing_it(
     engine: Engine,
     seeded_personal_context: None,
+    thread_id: str,
+    interaction_context: InteractionContext | None,
 ) -> None:
     recorder = ModelInputRecorder()
     agent = create_agent(  # pyright: ignore[reportUnknownVariableType]
@@ -115,6 +137,7 @@ def test_agent_captures_turn_and_injects_context_without_checkpointing_it(
                 character_limit=12_000,
             ),
         ],
+        context_schema=InteractionContext,
         checkpointer=InMemorySaver(),
         name="m45",
     )
@@ -125,7 +148,7 @@ def test_agent_captures_turn_and_injects_context_without_checkpointing_it(
     ]:
         config: RunnableConfig = {
             "configurable": {
-                "thread_id": CURRENT_CONVERSATION_ID,
+                "thread_id": thread_id,
             },
             "callbacks": [recorder],
         }
@@ -141,6 +164,7 @@ def test_agent_captures_turn_and_injects_context_without_checkpointing_it(
                     ]
                 },
                 config,
+                context=interaction_context,
             ),
         )
         state: StateSnapshot = await agent.aget_state(config)

@@ -1,15 +1,17 @@
 # m45
 
 Early implementation of a personal assistant with continuity (planned product
-name: Pleiades). The project is currently version **0.1.0**.
+name: Pleiades). The project is currently version **0.2.0**.
 
 The current increment provides PostgreSQL-backed durable source-message history,
 a bounded reader for recent context from other conversations, and a configurable
 LangGraph agent served through the local Agent Server. Ollama Cloud has been
 verified through Agent Chat UI, including recall across two separate threads and
-the corresponding durable source rows. Native agent middleware captures each
-completed turn and supplies recent cross-conversation context to the model without
-adding that context to checkpointed thread messages.
+the corresponding durable source rows. A single-user Discord DM adapter now calls
+the same private Agent Server and has been verified with two complete live turns.
+Native agent middleware captures each completed turn and supplies recent
+cross-conversation context to the model without adding that context to
+checkpointed thread messages.
 
 ## Local setup
 
@@ -61,6 +63,30 @@ a live request because the selected free-tier model was at capacity.
 
 Automated tests use a deterministic fake chat model directly; it is not selectable
 as an application provider.
+
+## Local Discord adapter
+
+Create a Discord bot application, add it to a private server owned by the same
+Discord account, and keep all privileged Gateway intents and guild permissions
+disabled. Set the bot token and the allowed human user's Discord ID in `.env`:
+
+```dotenv
+DISCORD_BOT_TOKEN=replace-with-the-bot-token
+DISCORD_ALLOWED_USER_ID=123456789012345678
+```
+
+With Agent Server running in one terminal, start the outbound Discord Gateway
+client in another:
+
+```sh
+uv run m45-discord
+```
+
+The adapter accepts text from that user's one-to-one DMs only. It ignores guild,
+group, bot, and unauthorized-user messages; attachments and stickers receive a
+text-only notice. Discord channel and message IDs provide durable source identity,
+while the channel ID deterministically maps to the LangGraph thread UUID. Agent
+Server remains on loopback and does not need a public inbound endpoint.
 
 ## Checks
 
@@ -126,8 +152,8 @@ missing selected-provider credential. The middleware integration test separately
 observes the actual model input, saved checkpoint messages, and durable source
 rows for one complete turn.
 
-There is no Discord adapter, importer, or long-term-memory mechanism yet. Agent
-Chat UI is the currently verified replaceable frontend.
+There is no importer or long-term-memory mechanism yet. Agent Chat UI and the
+single-user Discord DM adapter are the currently verified interaction surfaces.
 
 ## Repository map
 

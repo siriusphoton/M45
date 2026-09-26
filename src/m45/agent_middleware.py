@@ -1,6 +1,6 @@
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, cast
 
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -15,22 +15,34 @@ from langgraph.runtime import Runtime
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
+from m45.interaction import AGENT_CHAT_UI_SOURCE, InteractionContext
 from m45.personal_context import (
     format_recent_personal_context,
     load_recent_personal_context,
 )
 from m45.source_history import MessageRole, capture_source_message
 
-AGENT_CHAT_UI_SOURCE = "agent_chat_ui"
 
-
-def _thread_id(runtime: Runtime[None]) -> str:
+def _thread_id(runtime: Runtime[Any]) -> str:
     execution_info = runtime.execution_info
 
     if execution_info is None or execution_info.thread_id is None:
         raise ValueError("a LangGraph thread_id is required")
 
     return execution_info.thread_id
+
+
+def _interaction_identity(
+    runtime: Runtime[InteractionContext],
+    *,
+    default_source: str,
+) -> tuple[str, str]:
+    context = cast(InteractionContext | None, runtime.context)
+
+    if context is None:
+        return default_source, _thread_id(runtime)
+
+    return context.source, context.conversation_id
 
 
 def _text_content(
@@ -70,7 +82,7 @@ def _message_id(message: BaseMessage) -> str:
 
 
 class SourceHistoryMiddleware(
-    AgentMiddleware[AgentState[Any], None, Any],
+    AgentMiddleware[AgentState[Any], InteractionContext, Any],
 ):
     tools = ()
 
@@ -86,12 +98,17 @@ class SourceHistoryMiddleware(
     def _capture(
         self,
         state: AgentState[Any],
-        runtime: Runtime[None],
+        runtime: Runtime[InteractionContext],
         *,
         role: MessageRole,
     ) -> None:
         messages = state["messages"]
         expected_type = HumanMessage if role == "user" else AIMessage
+
+        source, conversation_id = _interaction_identity(
+            runtime,
+            default_source=self._source,
+        )
 
         if not messages or not isinstance(
             message := messages[-1],
@@ -102,8 +119,8 @@ class SourceHistoryMiddleware(
         with Session(self._bind) as session, session.begin():
             capture_source_message(
                 session,
-                source=self._source,
-                conversation_id=_thread_id(runtime),
+                source=source,
+                conversation_id=conversation_id,
                 message_id=_message_id(message),
                 role=role,
                 content=_text_content(message, role=role),
@@ -112,14 +129,14 @@ class SourceHistoryMiddleware(
     def before_agent(
         self,
         state: AgentState[Any],
-        runtime: Runtime[None],
+        runtime: Runtime[InteractionContext],
     ) -> None:
         self._capture(state, runtime, role="user")
 
     async def abefore_agent(
         self,
         state: AgentState[Any],
-        runtime: Runtime[None],
+        runtime: Runtime[InteractionContext],
     ) -> None:
         await asyncio.to_thread(
             self._capture,
@@ -131,14 +148,14 @@ class SourceHistoryMiddleware(
     def after_agent(
         self,
         state: AgentState[Any],
-        runtime: Runtime[None],
+        runtime: Runtime[InteractionContext],
     ) -> None:
         self._capture(state, runtime, role="assistant")
 
     async def aafter_agent(
         self,
         state: AgentState[Any],
-        runtime: Runtime[None],
+        runtime: Runtime[InteractionContext],
     ) -> None:
         await asyncio.to_thread(
             self._capture,
@@ -149,7 +166,7 @@ class SourceHistoryMiddleware(
 
 
 class PersonalContextMiddleware(
-    AgentMiddleware[AgentState[Any], None, Any],
+    AgentMiddleware[AgentState[Any], InteractionContext, Any],
 ):
     tools = ()
 
@@ -168,13 +185,13 @@ class PersonalContextMiddleware(
         self._message_limit = message_limit
         self._character_limit = character_limit
 
-    def _load(self, thread_id: str) -> str:
+    def _load(self, *, source: str, conversation_id: str) -> str:
         with Session(self._bind) as session:
             messages = load_recent_personal_context(
                 session,
                 eligible_sources=self._eligible_sources,
-                current_source=self._source,
-                current_conversation_id=thread_id,
+                current_source=source,
+                current_conversation_id=conversation_id,
                 message_limit=self._message_limit,
                 character_limit=self._character_limit,
             )
@@ -183,9 +200,9 @@ class PersonalContextMiddleware(
 
     @staticmethod
     def _with_context(
-        request: ModelRequest[None],
+        request: ModelRequest[InteractionContext],
         context: str,
-    ) -> ModelRequest[None]:
+    ) -> ModelRequest[InteractionContext]:
         if not context:
             return request
 
@@ -198,28 +215,37 @@ class PersonalContextMiddleware(
 
     def wrap_model_call(
         self,
-        request: ModelRequest[None],
+        request: ModelRequest[InteractionContext],
         handler: Callable[
-            [ModelRequest[None]],
+            [ModelRequest[InteractionContext]],
             ModelResponse[Any],
         ],
     ) -> ModelCallResult[Any]:
-        context = self._load(_thread_id(request.runtime))
+        source, conversation_id = _interaction_identity(
+            request.runtime,
+            default_source=self._source,
+        )
+        context = self._load(source=source, conversation_id=conversation_id)
         contextual_request = self._with_context(request, context)
 
         return handler(contextual_request)
 
     async def awrap_model_call(
         self,
-        request: ModelRequest[None],
+        request: ModelRequest[InteractionContext],
         handler: Callable[
-            [ModelRequest[None]],
+            [ModelRequest[InteractionContext]],
             Awaitable[ModelResponse[Any]],
         ],
     ) -> ModelCallResult[Any]:
+        source, conversation_id = _interaction_identity(
+            request.runtime,
+            default_source=self._source,
+        )
         context = await asyncio.to_thread(
             self._load,
-            _thread_id(request.runtime),
+            source=source,
+            conversation_id=conversation_id,
         )
         contextual_request = self._with_context(request, context)
 

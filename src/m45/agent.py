@@ -11,11 +11,15 @@ from pydantic import SecretStr
 from sqlalchemy import Engine
 
 from m45.agent_middleware import (
-    AGENT_CHAT_UI_SOURCE,
     PersonalContextMiddleware,
     SourceHistoryMiddleware,
 )
 from m45.config import Settings
+from m45.interaction import (
+    AGENT_CHAT_UI_SOURCE,
+    DISCORD_SOURCE,
+    InteractionContext,
+)
 
 type AgentGraph = Runnable[InputAgentState, OutputAgentState[Any]]
 
@@ -76,11 +80,12 @@ def create_application_agent(settings: Settings, engine: Engine) -> AgentGraph:
             PersonalContextMiddleware(
                 engine,
                 source=AGENT_CHAT_UI_SOURCE,
-                eligible_sources=(AGENT_CHAT_UI_SOURCE,),
+                eligible_sources=(AGENT_CHAT_UI_SOURCE, DISCORD_SOURCE),
                 message_limit=settings.personal_context_message_limit,
                 character_limit=settings.personal_context_character_limit,
             ),
         ],
+        context_schema=InteractionContext,
         name="m45",
     )
 

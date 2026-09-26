@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import PositiveInt, PostgresDsn, SecretStr
+from pydantic import AnyHttpUrl, PositiveInt, PostgresDsn, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,7 +9,11 @@ class Settings(BaseSettings):
 
     database_url: PostgresDsn
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    agent_server_url: AnyHttpUrl = AnyHttpUrl("http://127.0.0.1:2024")
+    agent_server_assistant_id: str = "m45"
 
+    discord_bot_token: SecretStr | None = None
+    discord_allowed_user_id: PositiveInt | None = None
     model_provider: Literal["google_genai", "ollama"] = "google_genai"
     model_name_google: str = "gemma-4-31b-it"
     model_name_ollama: str = "gemma4:31b-cloud"
