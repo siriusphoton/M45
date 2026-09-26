@@ -1,6 +1,8 @@
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -22,6 +24,12 @@ from m45.personal_context import (
 )
 from m45.source_history import MessageRole, capture_source_message
 
+INDIA_TIME_ZONE = ZoneInfo("Asia/Kolkata")
+
+
+def _current_time_in_india() -> datetime:
+    return datetime.now(INDIA_TIME_ZONE)
+
 
 def _thread_id(runtime: Runtime[Any]) -> str:
     execution_info = runtime.execution_info
@@ -30,6 +38,23 @@ def _thread_id(runtime: Runtime[Any]) -> str:
         raise ValueError("a LangGraph thread_id is required")
 
     return execution_info.thread_id
+
+
+def _append_system_text(
+    request: ModelRequest[InteractionContext],
+    text: str,
+) -> ModelRequest[InteractionContext]:
+    content_blocks = (
+        list(request.system_message.content_blocks) if request.system_message is not None else []
+    )
+    block_text = f"\n\n{text}" if content_blocks else text
+    content_blocks.append({"type": "text", "text": block_text})
+
+    return request.override(
+        system_message=SystemMessage(
+            content=cast("list[str | dict[str, Any]]", content_blocks),
+        ),
+    )
 
 
 def _interaction_identity(
@@ -165,6 +190,48 @@ class SourceHistoryMiddleware(
         )
 
 
+class CurrentTimeMiddleware(
+    AgentMiddleware[AgentState[Any], InteractionContext, Any],
+):
+    tools = ()
+
+    def __init__(
+        self,
+        clock: Callable[[], datetime] = _current_time_in_india,
+    ) -> None:
+        self._clock = clock
+
+    def _context(self) -> str:
+        current_time = self._clock().astimezone(INDIA_TIME_ZONE)
+        return (
+            f"Current date and time in India: {current_time:%A, %d %B %Y at %H:%M} IST (UTC+05:30)."
+        )
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest[InteractionContext],
+        handler: Callable[
+            [ModelRequest[InteractionContext]],
+            ModelResponse[Any],
+        ],
+    ) -> ModelCallResult[Any]:
+        return handler(
+            _append_system_text(request, self._context()),
+        )
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[InteractionContext],
+        handler: Callable[
+            [ModelRequest[InteractionContext]],
+            Awaitable[ModelResponse[Any]],
+        ],
+    ) -> ModelCallResult[Any]:
+        return await handler(
+            _append_system_text(request, self._context()),
+        )
+
+
 class PersonalContextMiddleware(
     AgentMiddleware[AgentState[Any], InteractionContext, Any],
 ):
@@ -198,21 +265,6 @@ class PersonalContextMiddleware(
 
         return format_recent_personal_context(messages)
 
-    @staticmethod
-    def _with_context(
-        request: ModelRequest[InteractionContext],
-        context: str,
-    ) -> ModelRequest[InteractionContext]:
-        if not context:
-            return request
-
-        system_text = request.system_message.text if request.system_message is not None else ""
-        combined = f"{system_text}\n\n{context}" if system_text else context
-
-        return request.override(
-            system_message=SystemMessage(content=combined),
-        )
-
     def wrap_model_call(
         self,
         request: ModelRequest[InteractionContext],
@@ -226,7 +278,7 @@ class PersonalContextMiddleware(
             default_source=self._source,
         )
         context = self._load(source=source, conversation_id=conversation_id)
-        contextual_request = self._with_context(request, context)
+        contextual_request = _append_system_text(request, context) if context else request
 
         return handler(contextual_request)
 
@@ -247,6 +299,6 @@ class PersonalContextMiddleware(
             source=source,
             conversation_id=conversation_id,
         )
-        contextual_request = self._with_context(request, context)
+        contextual_request = _append_system_text(request, context) if context else request
 
         return await handler(contextual_request)

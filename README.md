@@ -12,7 +12,8 @@ the same private Agent Server and has been verified with complete live turns.
 Recall has also been verified in both directions between Discord and a separate
 Agent Chat UI thread. Native agent middleware captures each completed turn and
 supplies recent cross-conversation context to the model without adding that
-context to checkpointed thread messages.
+context to checkpointed thread messages. The same model-call boundary supplies
+the current date and time in India without persisting it in agent state.
 
 ## Local setup
 
@@ -205,6 +206,10 @@ formats it as a role-labelled transcript with synthetic conversation labels, and
 adds it to that model request's system message. The injected transcript is not
 added to agent state or checkpoint history. Raw source IDs and capture timestamps
 remain database provenance rather than prompt content.
+
+`CurrentTimeMiddleware` computes the current date and time in `Asia/Kolkata` for
+each model call and adds it transiently to the system message before personal
+context. This value is neither added to agent state nor saved in checkpoints.
 
 `create_application_agent` builds the real LangGraph agent with the configured
 Google GenAI or Ollama chat model. `runtime.py` loads typed settings and exports

@@ -11,6 +11,7 @@ from pydantic import SecretStr
 from sqlalchemy import Engine
 
 from m45.agent_middleware import (
+    CurrentTimeMiddleware,
     PersonalContextMiddleware,
     SourceHistoryMiddleware,
 )
@@ -137,6 +138,7 @@ def create_application_agent(settings: Settings, engine: Engine) -> AgentGraph:
         system_prompt=APPLICATION_SYSTEM_PROMPT,
         middleware=[
             SourceHistoryMiddleware(engine, source=AGENT_CHAT_UI_SOURCE),
+            CurrentTimeMiddleware(),
             PersonalContextMiddleware(
                 engine,
                 source=AGENT_CHAT_UI_SOURCE,
