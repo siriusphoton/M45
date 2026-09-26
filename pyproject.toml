@@ -40,6 +40,9 @@ venv = ".venv"
 
 [tool.pytest.ini_options]
 addopts = ["--strict-config", "--strict-markers", "--import-mode=importlib"]
+filterwarnings = [
+    "ignore:'audioop' is deprecated and slated for removal in Python 3.13:DeprecationWarning",
+]
 
 [build-system]
 requires = ["uv_build>=0.11.2,<0.12"]
