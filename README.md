@@ -8,10 +8,11 @@ a bounded reader for recent context from other conversations, and a configurable
 LangGraph agent served through the local Agent Server. Ollama Cloud has been
 verified through Agent Chat UI, including recall across two separate threads and
 the corresponding durable source rows. A single-user Discord DM adapter now calls
-the same private Agent Server and has been verified with two complete live turns.
-Native agent middleware captures each completed turn and supplies recent
-cross-conversation context to the model without adding that context to
-checkpointed thread messages.
+the same private Agent Server and has been verified with complete live turns.
+Recall has also been verified in both directions between Discord and a separate
+Agent Chat UI thread. Native agent middleware captures each completed turn and
+supplies recent cross-conversation context to the model without adding that
+context to checkpointed thread messages.
 
 ## Local setup
 
@@ -38,6 +39,68 @@ docker compose down
 
 The `postgres_data` volume survives `docker compose down`. Adding `--volumes`
 deletes it. PostgreSQL initialization variables only affect a fresh volume.
+
+### Development source-history maintenance
+
+During local dogfooding, inspect or deliberately correct durable source rows with
+the PostgreSQL client already available in the container:
+
+```sh
+docker compose exec postgres psql -U m45 -d m45
+```
+
+Inside `psql`, list the newest messages with their database IDs:
+
+```sql
+\x auto
+SELECT id, source, conversation_id, message_id, role, captured_at, content
+FROM source_messages
+ORDER BY id DESC
+LIMIT 50;
+```
+
+Make local edits inside an explicit transaction so they can be inspected before
+they are committed:
+
+```sql
+BEGIN;
+
+UPDATE source_messages
+SET content = $message$replacement text$message$
+WHERE id = 42
+RETURNING id, source, conversation_id, message_id, role, content;
+
+COMMIT;
+```
+
+Delete selected rows using the same pattern:
+
+```sql
+BEGIN;
+
+DELETE FROM source_messages
+WHERE id IN (42, 43)
+RETURNING id, source, conversation_id, message_id, role, content;
+
+COMMIT;
+```
+
+To clear all local source history while preserving the table and reset its
+generated numeric IDs:
+
+```sql
+BEGIN;
+
+TRUNCATE TABLE source_messages RESTART IDENTITY;
+
+SELECT count(*) FROM source_messages;
+COMMIT;
+```
+
+Use `ROLLBACK;` instead of `COMMIT;` if the returned rows are not the intended
+ones. This developer-only maintenance changes source history but does not rewrite
+LangGraph checkpoints. A later re-execution may recreate a deleted row or reject
+an edited row whose original source identity is submitted again.
 
 ## Local Agent Server
 
