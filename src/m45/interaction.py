@@ -7,10 +7,16 @@ DISCORD_SOURCE = "discord"
 
 @dataclass(frozen=True, slots=True)
 class InteractionContext:
-    source: str
-    conversation_id: str
+    source: str | None = None
+    conversation_id: str | None = None
 
     def __post_init__(self) -> None:
+        if self.source is None and self.conversation_id is None:
+            return
+
+        if self.source is None or self.conversation_id is None:
+            raise ValueError("interaction source and conversation ID must be provided together")
+
         if not self.source:
             raise ValueError("interaction source must not be empty")
 

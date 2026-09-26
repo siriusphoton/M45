@@ -91,8 +91,8 @@ def seeded_personal_context(engine: Engine) -> Iterator[None]:
     [
         pytest.param(
             CURRENT_CONVERSATION_ID,
-            None,
-            id="agent-chat-ui-fallback",
+            InteractionContext(),
+            id="agent-chat-ui-empty-context",
         ),
         pytest.param(
             EXPLICIT_CONTEXT_THREAD_ID,

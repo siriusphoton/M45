@@ -1,6 +1,34 @@
 import pytest
 
-from m45.interaction import discord_thread_id
+from m45.interaction import InteractionContext, discord_thread_id
+
+
+def test_interaction_context_allows_absent_transport_identity() -> None:
+    context = InteractionContext()
+
+    assert context.source is None
+    assert context.conversation_id is None
+
+
+@pytest.mark.parametrize(
+    ("source", "conversation_id"),
+    [
+        ("discord", None),
+        (None, "123"),
+    ],
+)
+def test_interaction_context_rejects_partial_transport_identity(
+    source: str | None,
+    conversation_id: str | None,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="must be provided together",
+    ):
+        InteractionContext(
+            source=source,
+            conversation_id=conversation_id,
+        )
 
 
 def test_discord_thread_id_is_stable_and_channel_specific() -> None:

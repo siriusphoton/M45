@@ -39,7 +39,7 @@ def _interaction_identity(
 ) -> tuple[str, str]:
     context = cast(InteractionContext | None, runtime.context)
 
-    if context is None:
+    if context is None or context.source is None or context.conversation_id is None:
         return default_source, _thread_id(runtime)
 
     return context.source, context.conversation_id
