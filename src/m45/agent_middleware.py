@@ -204,7 +204,11 @@ class CurrentTimeMiddleware(
     def _context(self) -> str:
         current_time = self._clock().astimezone(INDIA_TIME_ZONE)
         return (
-            f"Current date and time in India: {current_time:%A, %d %B %Y at %H:%M} IST (UTC+05:30)."
+            "Authoritative current date and time for this model call: "
+            f"{current_time:%A, %d %B %Y at %H:%M} IST (UTC+05:30).\n"
+            "When answering based on current date or time, derive the answer "
+            "from this value. Earlier date or time statements in the conversation may "
+            "describe earlier turns and are not current."
         )
 
     def wrap_model_call(
