@@ -1,7 +1,7 @@
 # m45
 
 Early implementation of a personal assistant with continuity (planned product
-name: Pleiades). The project is currently version **0.2.0**.
+name: Pleiades). The project is currently version **0.3.0**.
 
 The current increment provides PostgreSQL-backed durable source-message history,
 a bounded reader for recent context from other conversations, and a configurable
@@ -13,7 +13,9 @@ Recall has also been verified in both directions between Discord and a separate
 Agent Chat UI thread. Native agent middleware captures each completed turn and
 supplies recent cross-conversation context to the model without adding that
 context to checkpointed thread messages. The same model-call boundary supplies
-the current date and time in India without persisting it in agent state.
+the current date and time in India without persisting it in agent state. The
+agent can use Ollama Web Search for current external information while retaining
+tool exchanges in checkpoint state rather than durable source history.
 
 ## Local setup
 
@@ -125,6 +127,13 @@ verified with two turns in Agent Chat UI, including server-owned thread history.
 The Google Gemini API path is configured and type-checked but has not yet completed
 a live request because the selected free-tier model was at capacity.
 
+Web search uses the Ollama API independently of the selected chat-model provider,
+so `OLLAMA_API_KEY` is required even when `MODEL_PROVIDER=google_genai`. Search
+queries should minimize personal information. Retrieved content is treated as
+untrusted evidence, and the agent is instructed to cite the source URLs it uses.
+Each run may call search at most three times, and a failed call is retried once
+before the model receives a sanitized failure message.
+
 Automated tests use a deterministic fake chat model directly; it is not selectable
 as an application provider.
 
@@ -193,7 +202,7 @@ provided SQLAlchemy session but does not commit it.
 `load_recent_personal_context` selects whole user and assistant messages from
 explicitly eligible sources, excludes the current conversation, and applies
 configurable message and character limits. It returns the selected window in
-chronological order.
+chronological order. Setting either limit to `0` disables that limit.
 
 `SourceHistoryMiddleware` commits the submitted user message before model
 invocation and the completed assistant message before the graph returns. It uses
@@ -201,7 +210,7 @@ the LangGraph thread ID as the source conversation identity and requires stable
 message IDs. Exact re-execution remains safe through the source-history
 idempotency contract.
 
-`PersonalContextMiddleware` loads the bounded window at the model-call boundary,
+`PersonalContextMiddleware` loads the configured window at the model-call boundary,
 formats it as a role-labelled transcript with synthetic conversation labels, and
 adds it to that model request's system message. The injected transcript is not
 added to agent state or checkpoint history. Raw source IDs and capture timestamps
@@ -210,6 +219,12 @@ remain database provenance rather than prompt content.
 `CurrentTimeMiddleware` computes the current date and time in `Asia/Kolkata` for
 each model call and adds it transiently to the system message before personal
 context. This value is neither added to agent state nor saved in checkpoints.
+
+`web_search` calls Ollama Web Search and returns up to three title, URL, and
+content blocks. LangChain's native tool-call limit and retry middleware bound its
+use. Tool-call requests and results remain in LangGraph checkpoint history so a
+run can be reconstructed, while `source_messages` stores only the submitted user
+message and completed assistant response.
 
 `create_application_agent` builds the real LangGraph agent with the configured
 Google GenAI or Ollama chat model. `runtime.py` loads typed settings and exports
