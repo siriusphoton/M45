@@ -851,7 +851,7 @@ otel = [
 
 [[package]]
 name = "m45"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
@@ -861,6 +861,7 @@ dependencies = [
     { name = "langchain-ollama" },
     { name = "langgraph" },
     { name = "langgraph-sdk" },
+    { name = "ollama" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic-settings" },
     { name = "sqlalchemy" },
@@ -883,6 +884,7 @@ requires-dist = [
     { name = "langchain-ollama", specifier = ">=1.1,<2" },
     { name = "langgraph", specifier = ">=1.2,<2" },
     { name = "langgraph-sdk", specifier = ">=0.4,<0.5" },
+    { name = "ollama", specifier = ">=0.6,<1" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
     { name = "pydantic-settings", specifier = ">=2.10,<3" },
     { name = "sqlalchemy", specifier = ">=2.0,<3" },

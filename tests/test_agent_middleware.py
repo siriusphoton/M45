@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime
 from typing import Any, cast
 from uuid import UUID
@@ -9,9 +9,17 @@ import pytest
 from langchain.agents import create_agent  # pyright: ignore[reportUnknownVariableType]
 from langchain.agents.middleware import OutputAgentState
 from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.language_models import LanguageModelInput
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_core.runnables import RunnableConfig
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langchain_core.runnables import Runnable, RunnableConfig
+from langchain_core.tools import BaseTool, tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import StateSnapshot
 from sqlalchemy import delete, select
@@ -26,13 +34,16 @@ from m45.agent_middleware import (
 )
 from m45.interaction import InteractionContext
 from m45.source_history import SourceMessage, capture_source_message
+from m45.web_search import WEB_SEARCH_TOOL_NAME
 
 TEST_SOURCE = "agent_middleware_test"
 OTHER_CONVERSATION_ID = "middleware-context-other"
 CURRENT_CONVERSATION_ID = "middleware-context-current"
+TOOL_CONVERSATION_ID = "middleware-tool-current"
 TEST_CONVERSATION_IDS = (
     OTHER_CONVERSATION_ID,
     CURRENT_CONVERSATION_ID,
+    TOOL_CONVERSATION_ID,
 )
 EXPLICIT_CONTEXT_THREAD_ID = "middleware-context-checkpoint-thread"
 FIXED_CURRENT_TIME = datetime(
@@ -63,8 +74,19 @@ class ModelInputRecorder(BaseCallbackHandler):
         self.model_inputs.extend(messages)
 
 
+class ToolCallingFakeChatModel(GenericFakeChatModel):
+    def bind_tools(
+        self,
+        tools: Sequence[dict[str, Any] | type | Callable[..., Any] | BaseTool],
+        *,
+        tool_choice: str | None = None,
+        **kwargs: Any,
+    ) -> Runnable[LanguageModelInput, AIMessage]:
+        return self
+
+
 @pytest.fixture
-def seeded_personal_context(engine: Engine) -> Iterator[None]:
+def source_history_test_data(engine: Engine) -> Iterator[None]:
     with Session(engine) as session, session.begin():
         session.execute(
             delete(SourceMessage).where(
@@ -117,7 +139,7 @@ def seeded_personal_context(engine: Engine) -> Iterator[None]:
 )
 def test_agent_captures_turn_and_injects_context_without_checkpointing_it(
     engine: Engine,
-    seeded_personal_context: None,
+    source_history_test_data: None,
     thread_id: str,
     interaction_context: InteractionContext | None,
 ) -> None:
@@ -238,5 +260,135 @@ def test_agent_captures_turn_and_injects_context_without_checkpointing_it(
             "assistant",
             "current-assistant-message",
             "You prefer Neovim.",
+        ),
+    ]
+
+
+def test_tool_turn_checkpoints_evidence_and_captures_only_final_messages(
+    engine: Engine,
+    source_history_test_data: None,
+) -> None:
+    @tool(WEB_SEARCH_TOOL_NAME)
+    def web_search(query: str) -> str:
+        """Search the public web."""
+        return (
+            "Title: PostgreSQL release notes\n"
+            "URL: https://www.postgresql.org/docs/release/\n"
+            f"Snippet: Results for {query}."
+        )
+
+    agent = create_agent(  # pyright: ignore[reportUnknownVariableType]
+        model=ToolCallingFakeChatModel(
+            messages=iter(
+                [
+                    AIMessage(
+                        content="",
+                        id="search-request-message",
+                        tool_calls=[
+                            {
+                                "name": WEB_SEARCH_TOOL_NAME,
+                                "args": {
+                                    "query": "current PostgreSQL release",
+                                },
+                                "id": "search-call-1",
+                                "type": "tool_call",
+                            }
+                        ],
+                    ),
+                    AIMessage(
+                        content=(
+                            "The release notes are available at "
+                            "https://www.postgresql.org/docs/release/."
+                        ),
+                        id="final-assistant-message",
+                    ),
+                ]
+            )
+        ),
+        tools=[web_search],
+        middleware=[
+            SourceHistoryMiddleware(
+                engine,
+                source=TEST_SOURCE,
+            ),
+        ],
+        context_schema=InteractionContext,
+        checkpointer=InMemorySaver(),
+        name="m45",
+    )
+    config: RunnableConfig = {
+        "configurable": {
+            "thread_id": TOOL_CONVERSATION_ID,
+        }
+    }
+
+    async def run_agent() -> tuple[
+        OutputAgentState[Any],
+        StateSnapshot,
+    ]:
+        result = cast(
+            "OutputAgentState[Any]",
+            await agent.ainvoke(  # pyright: ignore[reportUnknownMemberType]
+                {
+                    "messages": [
+                        HumanMessage(
+                            content="What is the current PostgreSQL release?",
+                            id="tool-turn-user-message",
+                        )
+                    ]
+                },
+                config,
+                context=InteractionContext(
+                    source=TEST_SOURCE,
+                    conversation_id=TOOL_CONVERSATION_ID,
+                ),
+            ),
+        )
+        state: StateSnapshot = await agent.aget_state(config)
+
+        return result, state
+
+    result, state = asyncio.run(run_agent())
+    checkpoint_messages = state.values["messages"]
+
+    assert [message.type for message in checkpoint_messages] == [
+        "human",
+        "ai",
+        "tool",
+        "ai",
+    ]
+    assert isinstance(checkpoint_messages[2], ToolMessage)
+    assert "https://www.postgresql.org/docs/release/" in checkpoint_messages[2].text
+    assert result["messages"] == checkpoint_messages
+
+    with Session(engine) as session:
+        captured_messages = list(
+            session.scalars(
+                select(SourceMessage)
+                .where(
+                    SourceMessage.source == TEST_SOURCE,
+                    SourceMessage.conversation_id == TOOL_CONVERSATION_ID,
+                )
+                .order_by(SourceMessage.id)
+            )
+        )
+
+    assert [
+        (
+            message.role,
+            message.message_id,
+            message.content,
+        )
+        for message in captured_messages
+    ] == [
+        (
+            "user",
+            "tool-turn-user-message",
+            "What is the current PostgreSQL release?",
+        ),
+        (
+            "assistant",
+            "final-assistant-message",
+            ("The release notes are available at https://www.postgresql.org/docs/release/."),
         ),
     ]

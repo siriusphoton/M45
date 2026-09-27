@@ -1,6 +1,6 @@
 [project]
 name = "m45"
-version = "0.2.0"
+version = "0.3.0"
 description = "A personal assistant with continuity."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -12,6 +12,7 @@ dependencies = [
     "langchain-ollama>=1.1,<2",
     "langgraph>=1.2,<2",
     "langgraph-sdk>=0.4,<0.5",
+    "ollama>=0.6,<1",
     "psycopg[binary]>=3.2,<4",
     "pydantic-settings>=2.10,<3",
     "sqlalchemy>=2.0,<3",
