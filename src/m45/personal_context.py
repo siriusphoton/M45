@@ -15,11 +15,11 @@ def load_recent_personal_context(
     message_limit: int,
     character_limit: int,
 ) -> list[SourceMessage]:
-    if message_limit <= 0:
-        raise ValueError("message_limit must be greater than zero")
+    if message_limit < 0:
+        raise ValueError("message_limit must not be negative")
 
-    if character_limit <= 0:
-        raise ValueError("character_limit must be greater than zero")
+    if character_limit < 0:
+        raise ValueError("character_limit must not be negative")
 
     if not eligible_sources:
         return []
@@ -39,8 +39,10 @@ def load_recent_personal_context(
             SourceMessage.captured_at.desc(),
             SourceMessage.id.desc(),
         )
-        .limit(message_limit)
     )
+
+    if message_limit:
+        statement = statement.limit(message_limit)
 
     newest_first = list(session.scalars(statement))
     selected: list[SourceMessage] = []
@@ -49,7 +51,7 @@ def load_recent_personal_context(
     for message in newest_first:
         next_character_count = selected_characters + len(message.content)
 
-        if next_character_count > character_limit:
+        if character_limit and next_character_count > character_limit:
             break
 
         selected.append(message)

@@ -141,6 +141,33 @@ def test_recent_context_stops_before_a_message_exceeding_character_limit(
     assert [message.message_id for message in messages] == ["newest"]
 
 
+def test_zero_limits_load_all_eligible_context(
+    session: Session,
+) -> None:
+    for number in range(1, 4):
+        _capture(
+            session,
+            conversation_id=f"other-{number}",
+            message_id=f"message-{number}",
+            content=f"Message {number}",
+        )
+
+    messages = load_recent_personal_context(
+        session,
+        eligible_sources=("agent_chat_ui",),
+        current_source="agent_chat_ui",
+        current_conversation_id="current",
+        message_limit=0,
+        character_limit=0,
+    )
+
+    assert [message.message_id for message in messages] == [
+        "message-1",
+        "message-2",
+        "message-3",
+    ]
+
+
 def test_formats_context_with_roles_and_conversation_boundaries(
     session: Session,
 ) -> None:

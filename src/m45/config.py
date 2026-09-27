@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import AnyHttpUrl, PositiveInt, PostgresDsn, SecretStr
+from pydantic import AnyHttpUrl, NonNegativeInt, PositiveInt, PostgresDsn, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,8 +22,8 @@ class Settings(BaseSettings):
     ollama_api_key: SecretStr | None = None
     ollama_base_url: str = "https://ollama.com"
 
-    personal_context_message_limit: PositiveInt = 20
-    personal_context_character_limit: PositiveInt = 12_000
+    personal_context_message_limit: NonNegativeInt = 20
+    personal_context_character_limit: NonNegativeInt = 12_000
 
 
 def load_settings() -> Settings:
