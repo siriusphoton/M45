@@ -11,11 +11,11 @@ the corresponding durable source rows. A single-user Discord DM adapter now call
 the same private Agent Server and has been verified with complete live turns.
 Recall has also been verified in both directions between Discord and a separate
 Agent Chat UI thread. Native agent middleware captures each completed turn and
-supplies recent cross-conversation context to the model without adding that
-context to checkpointed thread messages. The same model-call boundary supplies
-the current date and time in India without persisting it in agent state. The
-agent can use Ollama Web Search for current external information while retaining
-tool exchanges in checkpoint state rather than durable source history.
+supplies recent cross-conversation context without adding it to checkpointed
+messages. The same model-call boundary supplies the current date and time in
+India and capture times for active messages without persisting them in agent
+state. The agent can use Ollama Web Search for current external information while
+retaining tool exchanges in checkpoint state rather than durable source history.
 
 ## Local setup
 
@@ -200,21 +200,24 @@ Transaction ownership belongs to the caller. Source capture executes within the
 provided SQLAlchemy session but does not commit it.
 
 `load_recent_personal_context` selects whole user and assistant messages from
-explicitly eligible sources, excludes the current conversation, and applies
-configurable message and character limits. It returns the selected window in
-chronological order. Setting either limit to `0` disables that limit.
+explicitly eligible sources, excludes the current source conversation, and
+applies configurable message and character limits. It returns the selected
+window in chronological order. Setting either limit to `0` disables that limit.
 
 `SourceHistoryMiddleware` commits the submitted user message before model
 invocation and the completed assistant message before the graph returns. It uses
 the LangGraph thread ID as the source conversation identity and requires stable
 message IDs. Exact re-execution remains safe through the source-history
-idempotency contract.
+idempotency contract. For each model call, it also labels source-backed thread
+messages with their IST capture times in the model request only; neither the
+checkpointed messages nor the durable source content changes.
 
 `PersonalContextMiddleware` loads the configured window at the model-call boundary,
-formats it as a role-labelled transcript with synthetic conversation labels, and
-adds it to that model request's system message. The injected transcript is not
-added to agent state or checkpoint history. Raw source IDs and capture timestamps
-remain database provenance rather than prompt content.
+formats it as a role-labelled transcript with source, synthetic conversation
+labels, and capture times in IST, then adds it to that model request's system
+message. Capture times do not establish when the described events happened. The
+injected transcript is not added to agent state or checkpoint history; raw
+source IDs remain database provenance rather than prompt content.
 
 `CurrentTimeMiddleware` computes the current date and time in `Asia/Kolkata` for
 each model call and adds it transiently to the system message before personal

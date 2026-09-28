@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from typing import Any, cast
 from zoneinfo import ZoneInfo
@@ -14,6 +14,7 @@ from langchain.agents.middleware import (
 from langchain.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.messages import BaseMessage
 from langgraph.runtime import Runtime
+from sqlalchemy import select
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
@@ -22,7 +23,7 @@ from m45.personal_context import (
     format_recent_personal_context,
     load_recent_personal_context,
 )
-from m45.source_history import MessageRole, capture_source_message
+from m45.source_history import MessageRole, SourceMessage, capture_source_message
 
 INDIA_TIME_ZONE = ZoneInfo("Asia/Kolkata")
 
@@ -104,6 +105,29 @@ def _message_id(message: BaseMessage) -> str:
         raise ValueError("source messages require a message ID")
 
     return message.id
+
+
+def _source_message_ids(messages: Sequence[BaseMessage]) -> frozenset[str]:
+    return frozenset(
+        message.id
+        for message in messages
+        if isinstance(message, (HumanMessage, AIMessage)) and message.id
+    )
+
+
+def _with_capture_time(
+    message: HumanMessage | AIMessage, captured_at: datetime
+) -> HumanMessage | AIMessage:
+    local_time = captured_at.astimezone(INDIA_TIME_ZONE)
+    label = f"[Captured {local_time:%A, %d %B %Y, %H:%M} IST]\n"
+    content = message.content
+
+    if isinstance(content, str):
+        content = label + content
+    else:
+        content = [{"type": "text", "text": label}, *content]
+
+    return message.model_copy(update={"content": content})
 
 
 class SourceHistoryMiddleware(
@@ -189,6 +213,83 @@ class SourceHistoryMiddleware(
             role="assistant",
         )
 
+    def _capture_times(
+        self,
+        *,
+        source: str,
+        conversation_id: str,
+        message_ids: frozenset[str],
+    ) -> dict[str, datetime]:
+        if not message_ids:
+            return {}
+
+        with Session(self._bind) as session:
+            rows = session.execute(
+                select(SourceMessage.message_id, SourceMessage.captured_at).where(
+                    SourceMessage.source == source,
+                    SourceMessage.conversation_id == conversation_id,
+                    SourceMessage.message_id.in_(message_ids),
+                )
+            )
+            return {message_id: captured_at for message_id, captured_at in rows}
+
+    def _model_request_with_capture_times(
+        self,
+        request: ModelRequest[InteractionContext],
+        capture_times: dict[str, datetime],
+    ) -> ModelRequest[InteractionContext]:
+        model_messages = list(request.messages)
+
+        for index, message in enumerate(model_messages):
+            if isinstance(message, (HumanMessage, AIMessage)) and message.id in capture_times:
+                model_messages[index] = _with_capture_time(
+                    message,
+                    capture_times[message.id],
+                )
+
+        return request.override(messages=model_messages)
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest[InteractionContext],
+        handler: Callable[
+            [ModelRequest[InteractionContext]],
+            ModelResponse[Any],
+        ],
+    ) -> ModelCallResult[Any]:
+        source, conversation_id = _interaction_identity(
+            request.runtime,
+            default_source=self._source,
+        )
+        message_ids = _source_message_ids(request.messages)
+        capture_times = self._capture_times(
+            source=source,
+            conversation_id=conversation_id,
+            message_ids=message_ids,
+        )
+        return handler(self._model_request_with_capture_times(request, capture_times))
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[InteractionContext],
+        handler: Callable[
+            [ModelRequest[InteractionContext]],
+            Awaitable[ModelResponse[Any]],
+        ],
+    ) -> ModelCallResult[Any]:
+        source, conversation_id = _interaction_identity(
+            request.runtime,
+            default_source=self._source,
+        )
+        message_ids = _source_message_ids(request.messages)
+        capture_times = await asyncio.to_thread(
+            self._capture_times,
+            source=source,
+            conversation_id=conversation_id,
+            message_ids=message_ids,
+        )
+        return await handler(self._model_request_with_capture_times(request, capture_times))
+
 
 class CurrentTimeMiddleware(
     AgentMiddleware[AgentState[Any], InteractionContext, Any],
@@ -203,13 +304,7 @@ class CurrentTimeMiddleware(
 
     def _context(self) -> str:
         current_time = self._clock().astimezone(INDIA_TIME_ZONE)
-        return (
-            "Authoritative current date and time for this model call: "
-            f"{current_time:%A, %d %B %Y at %H:%M} IST (UTC+05:30).\n"
-            "When answering based on current date or time, derive the answer "
-            "from this value. Earlier date or time statements in the conversation may "
-            "describe earlier turns and are not current."
-        )
+        return f"Current date and time: {current_time:%A, %d %B %Y, %H:%M} IST."
 
     def wrap_model_call(
         self,
