@@ -31,6 +31,7 @@ from m45.agent_middleware import (
     CurrentTimeMiddleware,
     PersonalContextMiddleware,
     SourceHistoryMiddleware,
+    StripResponseTimestampMiddleware,
 )
 from m45.interaction import InteractionContext
 from m45.source_history import SourceMessage, capture_source_message
@@ -284,7 +285,7 @@ def test_agent_captures_turn_and_injects_context_without_checkpointing_it(
     )
     captured_at = current_user.captured_at.astimezone(ZoneInfo("Asia/Kolkata"))
     assert model_messages[1].text == (
-        f"[Captured {captured_at:%A, %d %B %Y, %H:%M} IST]\nWhich editor do I prefer?"
+        f"[{captured_at:%A, %d %B %Y, %H:%M} IST]\nWhich editor do I prefer?"
     )
 
 
@@ -294,7 +295,7 @@ def test_prior_thread_messages_have_model_only_capture_times_across_midnight(
 ) -> None:
     recorder = ModelInputRecorder()
     agent = create_agent(  # pyright: ignore[reportUnknownVariableType]
-        model=GenericFakeChatModel(
+        model=GenericFakeChatModel(  # type: ignore
             messages=iter(
                 [
                     AIMessage(content="First answer", id="late-assistant"),
@@ -344,12 +345,8 @@ def test_prior_thread_messages_have_model_only_capture_times_across_midnight(
     )
 
     model_messages = recorder.model_inputs[1]
-    assert model_messages[1].text == (
-        "[Captured Monday, 28 September 2026, 23:57 IST]\nLate greeting"
-    )
-    assert model_messages[2].text == (
-        "[Captured Monday, 28 September 2026, 23:58 IST]\nFirst answer"
-    )
+    assert model_messages[1].text == ("[Monday, 28 September 2026, 23:57 IST]\nLate greeting")
+    assert model_messages[2].text == ("[Monday, 28 September 2026, 23:58 IST]\nFirst answer")
     assert model_messages[3].text.endswith("\nWas that yesterday?")
 
     state = agent.get_state(config)  # pyright: ignore[reportUnknownMemberType]
@@ -489,3 +486,58 @@ def test_tool_turn_checkpoints_evidence_and_captures_only_final_messages(
             ("The release notes are available at https://www.postgresql.org/docs/release/."),
         ),
     ]
+
+
+def test_strip_response_timestamp_middleware(
+    engine: Engine,
+    source_history_test_data: None,
+) -> None:
+    agent = create_agent(  # pyright: ignore[reportUnknownVariableType]
+        model=GenericFakeChatModel(
+            messages=iter(
+                [
+                    AIMessage(
+                        content="[Tuesday, 29 September 2026, 23:10 IST]\nFair enough.",
+                        id="tsrtm-1",
+                    ),
+                ]
+            )
+        ),
+        tools=[],
+        system_prompt="Temporal test",
+        middleware=[
+            SourceHistoryMiddleware(
+                engine,
+                source=TEST_SOURCE,
+            ),
+            StripResponseTimestampMiddleware(),
+        ],
+        context_schema=InteractionContext,
+        checkpointer=InMemorySaver(),
+        name="m45",
+    )
+    config: RunnableConfig = {
+        "configurable": {
+            "thread_id": CURRENT_CONVERSATION_ID,
+        },
+    }
+    agent.invoke(  # pyright: ignore[reportUnknownMemberType]
+        {"messages": [HumanMessage(content="Hi", id="m1")]}, config=config
+    )
+
+    state: StateSnapshot = agent.get_state(config=config)
+    checkpoint_messages = state.values["messages"]
+
+    assert checkpoint_messages[-1].content == "Fair enough."
+    assert checkpoint_messages[-1].id == "tsrtm-1"
+
+    with Session(engine) as session:
+        captured_reply = session.scalars(
+            select(SourceMessage).where(
+                SourceMessage.source == TEST_SOURCE,
+                SourceMessage.conversation_id == CURRENT_CONVERSATION_ID,
+                SourceMessage.message_id == "tsrtm-1",
+            )
+        ).one()
+
+    assert captured_reply.content == "Fair enough."

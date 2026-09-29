@@ -21,6 +21,7 @@ from m45.agent_middleware import (
     CurrentTimeMiddleware,
     PersonalContextMiddleware,
     SourceHistoryMiddleware,
+    StripResponseTimestampMiddleware,
 )
 from m45.config import Settings
 from m45.interaction import (
@@ -89,6 +90,7 @@ def create_configured_chat_model(settings: Settings) -> BaseChatModel:
         return init_chat_model(
             settings.model_name_google,
             model_provider="google_genai",
+            temperature=0.0,
             api_key=api_key,
             vertexai=False,
         )
@@ -102,6 +104,7 @@ def create_configured_chat_model(settings: Settings) -> BaseChatModel:
     return init_chat_model(
         settings.model_name_ollama,
         model_provider="ollama",
+        temperature=0.0,
         base_url=settings.ollama_base_url,
         client_kwargs={
             "headers": {
@@ -133,6 +136,7 @@ def create_application_agent(settings: Settings, engine: Engine) -> AgentGraph:
         system_prompt=APPLICATION_SYSTEM_PROMPT,
         middleware=[
             SourceHistoryMiddleware(engine, source=AGENT_CHAT_UI_SOURCE),
+            StripResponseTimestampMiddleware(),
             search_call_limit,
             ToolRetryMiddleware[Any, InteractionContext](
                 max_retries=1,

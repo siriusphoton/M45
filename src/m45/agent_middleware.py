@@ -1,4 +1,5 @@
 import asyncio
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from typing import Any, cast
@@ -26,6 +27,10 @@ from m45.personal_context import (
 from m45.source_history import MessageRole, SourceMessage, capture_source_message
 
 INDIA_TIME_ZONE = ZoneInfo("Asia/Kolkata")
+LEADING_IST_TIMESTAMP = re.compile(
+    r"^\[[A-Za-z]+, \d{1,2} [A-Za-z]+ \d{4}, "
+    r"\d{1,2}:\d{2} IST\][ \t]*(?:\r?\n)?"
+)
 
 
 def _current_time_in_india() -> datetime:
@@ -119,7 +124,7 @@ def _with_capture_time(
     message: HumanMessage | AIMessage, captured_at: datetime
 ) -> HumanMessage | AIMessage:
     local_time = captured_at.astimezone(INDIA_TIME_ZONE)
-    label = f"[Captured {local_time:%A, %d %B %Y, %H:%M} IST]\n"
+    label = f"[{local_time:%A, %d %B %Y, %H:%M} IST]\n"
     content = message.content
 
     if isinstance(content, str):
@@ -401,3 +406,47 @@ class PersonalContextMiddleware(
         contextual_request = _append_system_text(request, context) if context else request
 
         return await handler(contextual_request)
+
+
+class StripResponseTimestampMiddleware(
+    AgentMiddleware[AgentState[Any], InteractionContext, Any],
+):
+    def _clean_response(self, state: AgentState[Any]) -> dict[str, Any] | None:
+        if not state["messages"]:
+            return None
+
+        message = state["messages"][-1]
+        if (
+            not isinstance(message, AIMessage)
+            or message.tool_calls
+            or message.invalid_tool_calls
+            or not isinstance(message.content, str)
+        ):
+            return None
+        match = LEADING_IST_TIMESTAMP.match(message.content)
+        if match is None:
+            return None
+
+        cleaned = message.content[match.end() :]
+        if not cleaned.strip():
+            return None
+
+        return {
+            "messages": [
+                message.model_copy(update={"content": cleaned}),
+            ]
+        }
+
+    def after_model(
+        self,
+        state: AgentState[Any],
+        runtime: Runtime[InteractionContext],
+    ) -> dict[str, Any] | None:
+        return self._clean_response(state)
+
+    async def aafter_model(
+        self,
+        state: AgentState[Any],
+        runtime: Runtime[InteractionContext],
+    ) -> dict[str, Any] | None:
+        return self._clean_response(state)
