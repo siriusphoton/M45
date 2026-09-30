@@ -4,7 +4,7 @@ Early implementation of a personal assistant with continuity (planned product
 name: Pleiades). The project is currently version **0.3.0**.
 
 The current increment provides PostgreSQL-backed durable source-message history,
-a bounded reader for recent context from other conversations, and a configurable
+a configurable reader for recent context from other conversations, and a
 LangGraph agent served through the local Agent Server. Ollama Cloud has been
 verified through Agent Chat UI, including recall across two separate threads and
 the corresponding durable source rows. A single-user Discord DM adapter now calls
@@ -16,6 +16,8 @@ messages. The same model-call boundary supplies the current date and time in
 India and capture times for active messages without persisting them in agent
 state. The agent can use Ollama Web Search for current external information while
 retaining tool exchanges in checkpoint state rather than durable source history.
+It removes an echoed leading IST timestamp from final assistant replies before
+they are saved; the raw prefix may briefly appear while Agent Chat UI streams.
 
 ## Local setup
 
@@ -124,6 +126,8 @@ The runtime supports `google_genai` and `ollama` through LangChain's native chat
 model integrations. Each provider keeps its own configured model name, so changing
 `MODEL_PROVIDER` selects the complete provider profile. Ollama Cloud has been
 verified with two turns in Agent Chat UI, including server-owned thread history.
+Both provider configurations request a sampling temperature of `0.0`; this does
+not guarantee identical outputs across runs.
 The Google Gemini API path is configured and type-checked but has not yet completed
 a live request because the selected free-tier model was at capacity.
 
@@ -222,6 +226,10 @@ source IDs remain database provenance rather than prompt content.
 `CurrentTimeMiddleware` computes the current date and time in `Asia/Kolkata` for
 each model call and adds it transiently to the system message before personal
 context. This value is neither added to agent state nor saved in checkpoints.
+
+`StripResponseTimestampMiddleware` removes a model-echoed leading IST timestamp
+from a final assistant message before it reaches checkpoint state and source
+capture. The streaming UI can show the prefix until that final state update.
 
 `web_search` calls Ollama Web Search and returns up to three title, URL, and
 content blocks. LangChain's native tool-call limit and retry middleware bound its
