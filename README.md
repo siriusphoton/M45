@@ -227,6 +227,15 @@ source IDs remain database provenance rather than prompt content.
 each model call and adds it transiently to the system message before personal
 context. This value is neither added to agent state nor saved in checkpoints.
 
+`InteractionInstructionsMiddleware` adds the latest standing interaction
+guidance from application PostgreSQL to each model call. Revision 0 is the
+code default; approved revisions are shared across threads without changing
+checkpointed messages. In Agent Chat UI, `update_instructions` proposes a full
+replacement when the user requests a lasting behavior change. LangChain pauses
+for approval, editing, or rejection before the tool writes a revision with
+source-message provenance. Discord receives the active guidance but cannot
+propose an update until its adapter supports review and resume.
+
 `StripResponseTimestampMiddleware` removes a model-echoed leading IST timestamp
 from a final assistant message before it reaches checkpoint state and source
 capture. The streaming UI can show the prefix until that final state update.

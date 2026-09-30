@@ -14,12 +14,15 @@ from langchain.agents.middleware import (
 )
 from langchain.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.messages import BaseMessage
+from langchain_core.tools import BaseTool
 from langgraph.runtime import Runtime
 from sqlalchemy import select
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
 from m45.interaction import AGENT_CHAT_UI_SOURCE, InteractionContext
+from m45.interaction_instructions import load_current_interaction_instructions
+from m45.interaction_instructions_tool import UPDATE_INTERACTION_INSTRUCTIONS_TOOL_NAME
 from m45.personal_context import (
     format_recent_personal_context,
     load_recent_personal_context,
@@ -450,3 +453,62 @@ class StripResponseTimestampMiddleware(
         runtime: Runtime[InteractionContext],
     ) -> dict[str, Any] | None:
         return self._clean_response(state)
+
+
+class InteractionInstructionsMiddleware(
+    AgentMiddleware[AgentState[Any], InteractionContext, Any],
+):
+    tools = ()
+
+    def __init__(self, bind: Engine | Connection) -> None:
+        self._bind = bind
+
+    def _load(self) -> str:
+        with Session(self._bind) as session:
+            revision, instructions = load_current_interaction_instructions(session)
+
+        return f"Standing interaction guidance (revision {revision}):\n{instructions}"
+
+    def _prepare_request(
+        self,
+        request: ModelRequest[InteractionContext],
+        guidance: str,
+    ) -> ModelRequest[InteractionContext]:
+        source, _ = _interaction_identity(
+            request.runtime,
+            default_source=AGENT_CHAT_UI_SOURCE,
+        )
+        if source != AGENT_CHAT_UI_SOURCE:
+            request = request.override(
+                tools=[
+                    available_tool
+                    for available_tool in request.tools
+                    if not (
+                        isinstance(available_tool, BaseTool)
+                        and available_tool.name == UPDATE_INTERACTION_INSTRUCTIONS_TOOL_NAME
+                    )
+                ]
+            )
+
+        return _append_system_text(request, guidance)
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest[InteractionContext],
+        handler: Callable[
+            [ModelRequest[InteractionContext]],
+            ModelResponse[Any],
+        ],
+    ) -> ModelCallResult[Any]:
+        return handler(self._prepare_request(request, self._load()))
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[InteractionContext],
+        handler: Callable[
+            [ModelRequest[InteractionContext]],
+            Awaitable[ModelResponse[Any]],
+        ],
+    ) -> ModelCallResult[Any]:
+        guidance = await asyncio.to_thread(self._load)
+        return await handler(self._prepare_request(request, guidance))

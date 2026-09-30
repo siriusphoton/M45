@@ -4,6 +4,7 @@ from alembic import context
 
 from m45.config import load_settings
 from m45.database import create_database_engine
+from m45.interaction_instructions import InteractionInstructionRevision
 from m45.source_history import SourceMessage
 
 config = context.config
@@ -11,7 +12,8 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-target_metadata = SourceMessage.metadata
+# Importing both mapped classes registers their tables on the shared metadata.
+target_metadata = (SourceMessage, InteractionInstructionRevision)[0].metadata
 
 
 def run_migrations_offline() -> None:
