@@ -3,9 +3,17 @@ from datetime import date, datetime
 
 import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from m45.daily_log import draft_daily_log, load_daily_source_messages
+from m45.daily_log import (
+    DailyLogRevision,
+    DailyLogRevisionSource,
+    draft_daily_log,
+    load_current_daily_log,
+    load_daily_source_messages,
+    save_daily_log_revision,
+)
 from m45.source_history import SourceMessage, capture_source_message
 
 
@@ -77,3 +85,105 @@ def test_daily_writer_rejects_empty_model_output() -> None:
                 messages=[message],
             )
         )
+
+
+def test_daily_log_revisions_preserve_history_and_exact_source_membership(
+    session: Session,
+) -> None:
+    day = date(2026, 10, 1)
+    cutoff = datetime.fromisoformat("2026-10-01T14:00:00+05:30")
+    original_message = capture_source_message(
+        session,
+        source="discord",
+        conversation_id="daily-log-test",
+        message_id="daily-0",
+        role="user",
+        content="The call is at 16:00.",
+    )
+    original_message.captured_at = datetime.fromisoformat("2026-10-01T12:00:00+05:30")
+    session.flush()
+
+    assert load_current_daily_log(session, day=day) is None
+    first_source_id = original_message.id
+    first = save_daily_log_revision(
+        session,
+        day=day,
+        expected_revision=0,
+        content="Call planned for 16:00.",
+        as_of=cutoff,
+        source_message_ids={first_source_id},
+    )
+
+    # This source arrives after revision 1 but predates its review cutoff.
+    late_message = capture_source_message(
+        session,
+        source="discord",
+        conversation_id="daily-log-test",
+        message_id="daily-1",
+        role="user",
+        content="It moved to 17:00.",
+    )
+    late_message.captured_at = datetime.fromisoformat("2026-10-01T13:00:00+05:30")
+    session.flush()
+
+    messages = load_daily_source_messages(
+        session,
+        day=day,
+        eligible_sources=("discord", "agent_chat_ui"),
+        before=cutoff,
+    )
+    source_ids = {message.id for message in messages}
+    assert source_ids == {first_source_id, late_message.id}
+
+    second = save_daily_log_revision(
+        session,
+        day=day,
+        expected_revision=1,
+        content="Call moved from 16:00 to 17:00.",
+        as_of=cutoff,
+        source_message_ids=source_ids,
+    )
+    expected_links = {(first.id, first_source_id)} | {
+        (second.id, source_id) for source_id in source_ids
+    }
+
+    with pytest.raises(ValueError, match="daily log changed"):
+        save_daily_log_revision(
+            session,
+            day=day,
+            expected_revision=1,
+            content="A stale replacement.",
+            as_of=cutoff,
+            source_message_ids=source_ids,
+        )
+
+    with pytest.raises(RuntimeError, match="cancel update"), session.begin_nested():
+        save_daily_log_revision(
+            session,
+            day=day,
+            expected_revision=2,
+            content="An update that must be rolled back.",
+            as_of=cutoff,
+            source_message_ids=source_ids,
+        )
+        raise RuntimeError("cancel update")
+
+    session.expire_all()
+    latest = load_current_daily_log(session, day=day)
+    assert latest is not None
+    assert (latest.revision, latest.content) == (2, "Call moved from 16:00 to 17:00.")
+    assert list(
+        session.execute(
+            select(DailyLogRevision.revision, DailyLogRevision.content)
+            .where(DailyLogRevision.day == day)
+            .order_by(DailyLogRevision.revision)
+        )
+    ) == [(1, "Call planned for 16:00."), (2, "Call moved from 16:00 to 17:00.")]
+    assert (
+        set(
+            session.execute(
+                select(DailyLogRevisionSource.revision_id, DailyLogRevisionSource.source_message_id)
+            )
+        )
+        == expected_links
+    )

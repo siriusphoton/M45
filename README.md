@@ -19,6 +19,10 @@ retaining tool exchanges in checkpoint state rather than durable source history.
 It removes an echoed leading IST timestamp from final assistant replies before
 they are saved; the raw prefix may briefly appear while Agent Chat UI streams.
 
+A manual daily writer generates and saves versioned narratives from copied source
+history in an isolated trial database. Revisions retain their exact input references
+and can be inspected independently of live conversations.
+
 ## Local setup
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Docker
@@ -90,22 +94,101 @@ RETURNING id, source, conversation_id, message_id, role, content;
 COMMIT;
 ```
 
-To clear all local source history while preserving the table and reset its
-generated numeric IDs:
-
-```sql
-BEGIN;
-
-TRUNCATE TABLE source_messages RESTART IDENTITY;
-
-SELECT count(*) FROM source_messages;
-COMMIT;
-```
-
 Use `ROLLBACK;` instead of `COMMIT;` if the returned rows are not the intended
 ones. This developer-only maintenance changes source history but does not rewrite
 LangGraph checkpoints. A later re-execution may recreate a deleted row or reject
 an edited row whose original source identity is submitted again.
+
+After applying the daily-log migration, saved revisions reference source rows.
+Referenced rows cannot be deleted without handling those dependencies, and
+`TRUNCATE source_messages` alone is no longer valid because another table references
+it. A full reset requires an explicit plan for dependent records; do not add
+`CASCADE` to bypass this. Direct content edits also do not revise existing logs.
+
+### Isolated historical memory trials
+
+Historical writer experiments use `m45_trial`, a separate database in the existing
+`postgres` service. It persists in the same local volume and is independent of the
+ephemeral `m45_test` database recreated by `scripts/check.sh`. Its dedicated login
+owns the trial database and receives no live-table privileges. The password below
+is a local-development value, like the credentials in `.env.example`.
+
+With the development PostgreSQL service running, create the role/database once:
+
+```sh
+docker compose exec -T postgres psql -X -U m45 -d postgres \
+  -v ON_ERROR_STOP=1 <<'SQL'
+CREATE ROLE m45_trial LOGIN PASSWORD 'm45_trial'
+    NOSUPERUSER NOCREATEDB NOCREATEROLE;
+CREATE DATABASE m45_trial OWNER m45_trial;
+SQL
+```
+
+Apply the same application schema using the trial login. These command-scoped
+overrides leave the live `DATABASE_URL` in `.env` unchanged:
+
+```sh
+DATABASE_URL=postgresql+psycopg://m45_trial:m45_trial@127.0.0.1:5432/m45_trial \
+  uv run --no-sync alembic upgrade head
+
+DATABASE_URL=postgresql+psycopg://m45_trial:m45_trial@127.0.0.1:5432/m45_trial \
+  uv run --no-sync alembic check
+```
+
+Verify that the trial role has no write privileges on live application tables.
+Every `can_write` result must be `f` before historical trials:
+
+```sh
+docker compose exec -T postgres psql -X -U m45 -d m45 \
+  -v ON_ERROR_STOP=1 <<'SQL'
+SELECT c.relname AS live_table,
+       has_table_privilege(
+           'm45_trial', c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE'
+       ) AS can_write
+FROM pg_class AS c
+JOIN pg_namespace AS n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public' AND c.relkind = 'r'
+ORDER BY c.relname;
+SQL
+```
+
+The fresh trial database is empty after migration. Copy explicitly selected source
+rows into it before running a historical trial, preserving their IDs, identities,
+content and capture timestamps. Source copying is currently a manual preparation
+step; the runner does not read from the live database. Keep private transcripts out
+of committed fixtures. Trial outputs do not enter live context or advance live coverage.
+
+With the selected day's source rows present, generate and persist a trial revision:
+
+```sh
+DATABASE_URL=postgresql+psycopg://m45_trial:m45_trial@127.0.0.1:5432/m45_trial \
+LANGSMITH_TRACING=false \
+uv run --no-sync python scripts/trial_daily_log.py \
+  2026-10-01 --as-of 2026-10-02T05:00:00+05:30
+```
+
+`day` selects the 05:00 IST processing window. `--as-of` is an exclusive,
+timezone-aware review cutoff; it limits source evidence supplied to the writer.
+The runner requires the `m45_trial` database/login, uses the configured model,
+and loads the previous daily log before generating its replacement. It commits
+the narrative and exact input references together, then prints the saved revision
+and narrative. Every successful explicit invocation creates another revision,
+even with unchanged evidence; there is no transparent save-retry protocol.
+Begin an evolving-day trial without a later saved log for that day, so future
+information cannot enter through the previous narrative.
+
+Inspect saved revisions and their source counts:
+
+```sh
+docker compose exec -T postgres psql -X -U m45_trial -d m45_trial \
+  -v ON_ERROR_STOP=1 <<'SQL'
+SELECT r.day, r.revision, count(s.source_message_id) AS sources
+FROM daily_log_revisions AS r
+LEFT JOIN daily_log_revision_sources AS s ON s.revision_id = r.id
+GROUP BY r.id
+ORDER BY r.day, r.revision;
+SQL
+```
 
 ## Local Agent Server
 
@@ -203,6 +286,20 @@ distinct even when their text is identical.
 Transaction ownership belongs to the caller. Source capture executes within the
 provided SQLAlchemy session but does not commit it.
 
+`daily_log.py` reads a processing day's eligible source messages across conversations
+using a 05:00 IST boundary, presents their provenance, and generates a replacement
+narrative using a direct model call. The writer logs reported circumstances;
+interpretation and cross-day reconciliation belong to later consolidation.
+Its current presentation uses Sleep and rest, Meals, and Tasks and plans sections,
+followed by relevant descriptive topics and optional material Unresolved details.
+Trials showed successful task/meal status updates and retained earlier context,
+alongside attribution errors, omitted corrections and repeated details. The logs
+remain derived accounts whose original source evidence is retained for inspection.
+Daily-log revisions retain their exact input source IDs in a separate linking
+table. The load/save functions preserve earlier versions, reject stale saves and
+flush narrative plus references in the caller's transaction. They are not yet
+connected to a scheduler or conversational context injection.
+
 `load_recent_personal_context` selects whole user and assistant messages from
 explicitly eligible sources, excludes the current source conversation, and
 applies configurable message and character limits. It returns the selected
@@ -255,18 +352,19 @@ missing selected-provider credential. The middleware integration test separately
 observes the actual model input, saved checkpoint messages, and durable source
 rows for one complete turn.
 
-There is no importer or long-term-memory mechanism yet. Agent Chat UI and the
+There is no importer or consolidated long-term-memory workflow yet. Agent Chat UI and the
 single-user Discord DM adapter are the currently verified interaction surfaces.
 
 ## Repository map
 
 | Path | Responsibility | Effect of removing it |
 | --- | --- | --- |
-| `src/m45/` | Application package, typed configuration, database setup, source-history persistence, recent-context selection, provider-backed agent construction, and the Agent Server runtime export. | Application imports, persistence, context selection, model construction, and graph loading fail. |
+| `src/m45/` | Application package, typed configuration, database setup, source-history persistence, daily-log drafting/revision persistence, recent-context selection, provider-backed agent construction, and the Agent Server runtime export. | Application imports, persistence, context selection, model construction, and graph loading fail. |
 | `migrations/` | Alembic environment and versioned PostgreSQL schema changes. | Fresh and existing databases cannot be brought to the expected schema. |
-| `tests/` | Tests for source identity, recent-context selection and formatting, middleware boundaries, deterministic agent behavior, and provider credential validation. | Persistence, context-selection, model-input, checkpoint, source-capture, and graph-runtime contracts lose automated verification. |
+| `tests/` | Tests for source identity, daily-log boundaries/revisions, recent-context selection and formatting, middleware boundaries, deterministic agent behavior, and provider credential validation. | Persistence, context-selection, model-input, checkpoint, source-capture, and graph-runtime contracts lose automated verification. |
 | `scripts/check.sh` | Canonical local and CI verification workflow. | Local and CI checks no longer share one entry point. |
 | `scripts/dev.sh` | Canonical local Agent Server launcher with tracing and CLI analytics disabled. | Developers must reconstruct the correct privacy-preserving server command. |
+| `scripts/trial_daily_log.py` | Manual daily writer against copied evidence in the isolated trial database. | The reusable terminal path for generating and inspecting saved trial revisions is lost. |
 | `.github/workflows/check.yml` | Runs the canonical checks on pushes and pull requests. | Automated repository checks stop. |
 | `langgraph.json` | Declares the Python runtime and exposes the compiled `m45` graph to Agent Server. | The CLI cannot discover or serve the graph. |
 | `pyproject.toml` | Project metadata, dependencies, and Python tool configuration. | uv and the configured development tools lose their project definition. |
