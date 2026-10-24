@@ -9,10 +9,10 @@ from sqlalchemy.orm import Session
 from m45.daily_log import (
     DailyLogRevision,
     DailyLogRevisionSource,
+    append_daily_log_revision,
     draft_daily_log,
-    load_current_daily_log,
     load_daily_source_messages,
-    save_daily_log_revision,
+    load_latest_daily_log_revision,
 )
 from m45.source_history import SourceMessage, capture_source_message
 
@@ -44,7 +44,7 @@ def test_daily_source_messages_respect_window_sources_and_cutoff(
 
     messages = load_daily_source_messages(
         session,
-        day=date(2026, 10, 9),
+        processing_day=date(2026, 10, 9),
         eligible_sources=("discord", "agent_chat_ui"),
     )
 
@@ -56,7 +56,7 @@ def test_daily_source_messages_respect_window_sources_and_cutoff(
 
     morning_messages = load_daily_source_messages(
         session,
-        day=date(2026, 10, 9),
+        processing_day=date(2026, 10, 9),
         eligible_sources=("discord", "agent_chat_ui"),
         before=datetime.fromisoformat("2026-10-09T06:30:00+00:00"),
     )
@@ -80,7 +80,7 @@ def test_daily_writer_rejects_empty_model_output() -> None:
         asyncio.run(
             draft_daily_log(
                 model,
-                day=date(2026, 10, 9),
+                processing_day=date(2026, 10, 9),
                 as_of=datetime.fromisoformat("2026-10-09T13:00:00+05:30"),
                 messages=[message],
             )
@@ -90,7 +90,7 @@ def test_daily_writer_rejects_empty_model_output() -> None:
 def test_daily_log_revisions_preserve_history_and_exact_source_membership(
     session: Session,
 ) -> None:
-    day = date(2026, 10, 1)
+    processing_day = date(2026, 10, 1)
     cutoff = datetime.fromisoformat("2026-10-01T14:00:00+05:30")
     original_message = capture_source_message(
         session,
@@ -103,12 +103,12 @@ def test_daily_log_revisions_preserve_history_and_exact_source_membership(
     original_message.captured_at = datetime.fromisoformat("2026-10-01T12:00:00+05:30")
     session.flush()
 
-    assert load_current_daily_log(session, day=day) is None
+    assert load_latest_daily_log_revision(session, processing_day=processing_day) is None
     first_source_id = original_message.id
-    first = save_daily_log_revision(
+    first = append_daily_log_revision(
         session,
-        day=day,
-        expected_revision=0,
+        processing_day=processing_day,
+        base_revision_number=0,
         content="Call planned for 16:00.",
         as_of=cutoff,
         source_message_ids={first_source_id},
@@ -128,17 +128,17 @@ def test_daily_log_revisions_preserve_history_and_exact_source_membership(
 
     messages = load_daily_source_messages(
         session,
-        day=day,
+        processing_day=processing_day,
         eligible_sources=("discord", "agent_chat_ui"),
         before=cutoff,
     )
     source_ids = {message.id for message in messages}
     assert source_ids == {first_source_id, late_message.id}
 
-    second = save_daily_log_revision(
+    second = append_daily_log_revision(
         session,
-        day=day,
-        expected_revision=1,
+        processing_day=processing_day,
+        base_revision_number=1,
         content="Call moved from 16:00 to 17:00.",
         as_of=cutoff,
         source_message_ids=source_ids,
@@ -148,20 +148,20 @@ def test_daily_log_revisions_preserve_history_and_exact_source_membership(
     }
 
     with pytest.raises(ValueError, match="daily log changed"):
-        save_daily_log_revision(
+        append_daily_log_revision(
             session,
-            day=day,
-            expected_revision=1,
+            processing_day=processing_day,
+            base_revision_number=1,
             content="A stale replacement.",
             as_of=cutoff,
             source_message_ids=source_ids,
         )
 
     with pytest.raises(RuntimeError, match="cancel update"), session.begin_nested():
-        save_daily_log_revision(
+        append_daily_log_revision(
             session,
-            day=day,
-            expected_revision=2,
+            processing_day=processing_day,
+            base_revision_number=2,
             content="An update that must be rolled back.",
             as_of=cutoff,
             source_message_ids=source_ids,
@@ -169,20 +169,26 @@ def test_daily_log_revisions_preserve_history_and_exact_source_membership(
         raise RuntimeError("cancel update")
 
     session.expire_all()
-    latest = load_current_daily_log(session, day=day)
-    assert latest is not None
-    assert (latest.revision, latest.content) == (2, "Call moved from 16:00 to 17:00.")
+    latest_log_revision = load_latest_daily_log_revision(session, processing_day=processing_day)
+    assert latest_log_revision is not None
+    assert (latest_log_revision.revision_number, latest_log_revision.content) == (
+        2,
+        "Call moved from 16:00 to 17:00.",
+    )
     assert list(
         session.execute(
-            select(DailyLogRevision.revision, DailyLogRevision.content)
-            .where(DailyLogRevision.day == day)
-            .order_by(DailyLogRevision.revision)
+            select(DailyLogRevision.revision_number, DailyLogRevision.content)
+            .where(DailyLogRevision.processing_day == processing_day)
+            .order_by(DailyLogRevision.revision_number)
         )
     ) == [(1, "Call planned for 16:00."), (2, "Call moved from 16:00 to 17:00.")]
     assert (
         set(
             session.execute(
-                select(DailyLogRevisionSource.revision_id, DailyLogRevisionSource.source_message_id)
+                select(
+                    DailyLogRevisionSource.daily_log_revision_id,
+                    DailyLogRevisionSource.source_message_id,
+                )
             )
         )
         == expected_links

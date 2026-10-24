@@ -25,6 +25,10 @@ uv run --no-sync pyright
 cleanup_test_database
 "${compose[@]}" up --detach --wait postgres_test
 
+"${compose[@]}" exec -T postgres_test \
+    psql -X -U m45 -d m45_test -v ON_ERROR_STOP=1 \
+    -c 'CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;'
+
 DATABASE_URL="$test_database_url" \
     uv run --no-sync alembic upgrade head
 

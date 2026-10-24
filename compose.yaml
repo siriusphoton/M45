@@ -2,7 +2,7 @@ name: m45
 
 services:
   postgres:
-    image: postgres:17
+    image: pgvector/pgvector:0.8.7-pg17-trixie
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-m45}
       POSTGRES_USER: ${POSTGRES_USER:-m45}
@@ -18,7 +18,7 @@ services:
       retries: 10
       start_period: 5s
   postgres_test:
-    image: postgres:17
+    image: pgvector/pgvector:0.8.7-pg17-trixie
     profiles: ["test"]
     environment:
       POSTGRES_DB: ${POSTGRES_TEST_DB:-m45_test}

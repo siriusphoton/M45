@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     ollama_api_key: SecretStr | None = None
     ollama_base_url: str = "https://ollama.com"
 
+    embedding_model: str = "qwen3-embedding:0.6b"
+    embedding_base_url: AnyHttpUrl = AnyHttpUrl("http://127.0.0.1:11434")
+
     personal_context_message_limit: NonNegativeInt = 20
     personal_context_character_limit: NonNegativeInt = 12_000
 

@@ -30,11 +30,11 @@ class DailyLogRevision(Base):
     __tablename__ = "daily_log_revisions"
     __table_args__ = (
         UniqueConstraint(
-            "day",
-            "revision",
+            "processing_day",
+            "revision_number",
             name="uq_daily_log_revisions_day_revision",
         ),
-        CheckConstraint("revision > 0", name="ck_daily_log_revisions_revision_positive"),
+        CheckConstraint("revision_number > 0", name="ck_daily_log_revisions_revision_positive"),
         CheckConstraint(
             "content <> ''",
             name="ck_daily_log_revisions_content_nonempty",
@@ -42,8 +42,8 @@ class DailyLogRevision(Base):
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    day: Mapped[date] = mapped_column(Date)
-    revision: Mapped[int] = mapped_column(Integer)
+    processing_day: Mapped[date] = mapped_column(Date)
+    revision_number: Mapped[int] = mapped_column(Integer)
     content: Mapped[str] = mapped_column(Text)
     as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
@@ -57,7 +57,7 @@ class DailyLogRevisionSource(Base):
 
     __tablename__ = "daily_log_revision_sources"
 
-    revision_id: Mapped[int] = mapped_column(
+    daily_log_revision_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("daily_log_revisions.id"),
         primary_key=True,
@@ -118,16 +118,29 @@ DAILY_LOG_PROMPT = (
 )
 
 
-def _day_window(day: date) -> tuple[datetime, datetime]:
-    """Return the inclusive start and exclusive end of a processing day"""
-    start = datetime.combine(day, time(hour=5), tzinfo=ZoneInfo("Asia/Kolkata"))
+PROCESSING_DAY_START_HOUR = 5
+
+
+def processing_day_at(timestamp: datetime) -> date:
+    """Resolve an aware timestamp to its 05:00 IST processing-day label."""
+    if timestamp.utcoffset() is None:
+        raise ValueError("timestamp must include a time zone")
+    local_time = timestamp.astimezone(ZoneInfo("Asia/Kolkata"))
+    return (local_time - timedelta(hours=PROCESSING_DAY_START_HOUR)).date()
+
+
+def _day_window(processing_day: date) -> tuple[datetime, datetime]:
+    """Return the inclusive start and exclusive end of a processing day."""
+    start = datetime.combine(
+        processing_day, time(hour=PROCESSING_DAY_START_HOUR), tzinfo=ZoneInfo("Asia/Kolkata")
+    )
     return start, start + timedelta(days=1)
 
 
 def load_daily_source_messages(
     session: Session,
     *,
-    day: date,
+    processing_day: date,
     eligible_sources: tuple[str, ...],
     before: datetime | None = None,
 ) -> list[SourceMessage]:
@@ -138,7 +151,7 @@ def load_daily_source_messages(
     if not eligible_sources:
         return []
 
-    start, end = _day_window(day)
+    start, end = _day_window(processing_day)
 
     if before is not None:
         end = min(end, before)
@@ -177,51 +190,55 @@ def format_daily_source_messages(
     return json.dumps(records, ensure_ascii=False, indent=2)
 
 
-def load_current_daily_log(session: Session, *, day: date) -> DailyLogRevision | None:
+def load_latest_daily_log_revision(
+    session: Session, *, processing_day: date
+) -> DailyLogRevision | None:
     """Load the latest saved revision for one processing day."""
     return session.scalar(
         select(DailyLogRevision)
-        .where(DailyLogRevision.day == day)
-        .order_by(DailyLogRevision.revision.desc())
+        .where(DailyLogRevision.processing_day == processing_day)
+        .order_by(DailyLogRevision.revision_number.desc())
         .limit(1)
     )
 
 
-def save_daily_log_revision(
+def append_daily_log_revision(
     session: Session,
     *,
-    day: date,
-    expected_revision: int,
+    processing_day: date,
+    base_revision_number: int,
     content: str,
     as_of: datetime,
     source_message_ids: set[int],
 ) -> DailyLogRevision:
-    """Flush a revision and its input references; the caller owns the transaction."""
+    """Append a revision based on the given revision number; caller owns commit."""
     if as_of.utcoffset() is None:
         raise ValueError("as_of must include a time zone")
     if not content.strip() or not source_message_ids:
         raise ValueError("daily log requires content and source messages")
 
-    current = load_current_daily_log(session, day=day)
-    current_revision = current.revision if current is not None else 0
-    if current_revision != expected_revision:
+    latest_log_revision = load_latest_daily_log_revision(session, processing_day=processing_day)
+    latest_revision_number = (
+        latest_log_revision.revision_number if latest_log_revision is not None else 0
+    )
+    if latest_revision_number != base_revision_number:
         raise ValueError(
-            f"daily log changed: expected revision {expected_revision}, "
-            f"current revision {current_revision}"
+            f"daily log changed: draft based on revision {base_revision_number}, "
+            f"latest revision is {latest_revision_number}"
         )
 
-    if current is not None:
+    if latest_log_revision is not None:
         previous_ids = set(
             session.scalars(
                 select(DailyLogRevisionSource.source_message_id).where(
-                    DailyLogRevisionSource.revision_id == current.id
+                    DailyLogRevisionSource.daily_log_revision_id == latest_log_revision.id
                 )
             )
         )
-        if as_of < current.as_of or not previous_ids.issubset(source_message_ids):
+        if as_of < latest_log_revision.as_of or not previous_ids.issubset(source_message_ids):
             raise ValueError("daily log refresh cannot discard reviewed evidence")
 
-    start, end = _day_window(day)
+    start, end = _day_window(processing_day)
     valid_ids = set(
         session.scalars(
             select(SourceMessage.id).where(
@@ -234,26 +251,26 @@ def save_daily_log_revision(
     if valid_ids != source_message_ids:
         raise ValueError("source messages must exist within the day and review cutoff")
 
-    revision = DailyLogRevision(
-        day=day,
-        revision=expected_revision + 1,
+    log_revision = DailyLogRevision(
+        processing_day=processing_day,
+        revision_number=base_revision_number + 1,
         content=content,
         as_of=as_of,
     )
-    session.add(revision)
+    session.add(log_revision)
     session.flush()
     session.add_all(
-        DailyLogRevisionSource(revision_id=revision.id, source_message_id=source_id)
+        DailyLogRevisionSource(daily_log_revision_id=log_revision.id, source_message_id=source_id)
         for source_id in sorted(source_message_ids)
     )
     session.flush()
-    return revision
+    return log_revision
 
 
 async def draft_daily_log(
     model: BaseChatModel,
     *,
-    day: date,
+    processing_day: date,
     as_of: datetime,
     messages: Sequence[SourceMessage],
     previous_log: str | None = None,
@@ -269,7 +286,7 @@ async def draft_daily_log(
     review_time = as_of.astimezone(ZoneInfo("Asia/Kolkata"))
     request = HumanMessage(
         content=(
-            f"Processing day: {day.isoformat()} (05:00 IST to next-day 05:00 IST).\n"
+            f"Processing day: {processing_day.isoformat()} (05:00 IST to next-day 05:00 IST).\n"
             f"Review cutoff, exclusive: {review_time:%A, %d %B %Y, %H:%M:%S IST}.\n\n"
             "Previous daily log (JSON string; null means no previous log):\n"
             f"{json.dumps(previous_log, ensure_ascii=False)}\n\n"

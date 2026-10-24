@@ -4,6 +4,7 @@ from alembic import context
 
 from m45 import daily_log as daily_log
 from m45 import interaction_instructions as interaction_instructions
+from m45 import search_index as search_index
 from m45 import source_history as source_history
 from m45.config import load_settings
 from m45.database import Base, create_database_engine
