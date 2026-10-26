@@ -21,7 +21,9 @@ they are saved; the raw prefix may briefly appear while Agent Chat UI streams.
 
 A manual daily writer generates and saves versioned narratives from copied source
 history in an isolated trial database. Revisions retain their exact input references
-and can be inspected independently of live conversations.
+and can be inspected independently of live conversations. The runner commits the
+revision and lexical passages together, then attempts local embedding with bounded
+retries. An embedding failure leaves the saved narrative and lexical search intact.
 
 ## Local setup
 
@@ -32,6 +34,9 @@ with Compose. Python 3.12 is selected by `.python-version`.
 uv sync --locked
 cp -n .env.example .env
 docker compose up -d --wait postgres
+docker compose exec -T postgres psql -X -U m45 -d m45 \
+  -v ON_ERROR_STOP=1 \
+  -c 'CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;'
 uv run alembic upgrade head
 ```
 
@@ -48,6 +53,27 @@ docker compose down
 
 The `postgres_data` volume survives `docker compose down`. Adding `--volumes`
 deletes it. PostgreSQL initialization variables only affect a fresh volume.
+
+The retrieval database setup uses `pgvector/pgvector:0.8.7-pg17-trixie` for both
+PostgreSQL services. The image supplies pgvector's files; the administrator command
+above enables its SQL types and operators in the development database. Repeat that
+provisioning for each new database before applying retrieval migrations. Application
+tables remain Alembic-managed; installing the extension is an administrative setup
+step rather than an application-startup action. `scripts/check.sh` performs the same
+setup for its disposable test database. Before switching an existing container to
+this image, back up its databases and retain the existing `postgres_data` volume.
+
+Retrieval preparation has separate `EMBEDDING_MODEL` and `EMBEDDING_BASE_URL`
+settings for a local Ollama embedding service. These do not select the assistant's
+chat model. The manual daily writer now calls the embedding workflow; its database
+and retry behavior is verified with synthetic vectors. The developer's real trial
+also stored all six passages of the 1 October log's second revision as
+1024-dimensional `qwen3-embedding:0.6b` vectors. Standalone semantic search is now
+implemented, and the first trial query found the relevant phone-purchase passage.
+Hybrid search combines lexical and semantic rankings by passage ID. The isolated
+trial also retrieves original conversation passages alongside daily-log passages.
+Conversational retrieval is not wired yet, so ordinary chat does not require that
+local service.
 
 ### Development source-history maintenance
 
@@ -122,7 +148,14 @@ CREATE ROLE m45_trial LOGIN PASSWORD 'm45_trial'
     NOSUPERUSER NOCREATEDB NOCREATEROLE;
 CREATE DATABASE m45_trial OWNER m45_trial;
 SQL
+
+docker compose exec -T postgres psql -X -U m45 -d m45_trial \
+  -v ON_ERROR_STOP=1 \
+  -c 'CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;'
 ```
+
+The extension command uses the administrator login `m45`; the trial login remains
+restricted and does not need permission to install extensions.
 
 Apply the same application schema using the trial login. These command-scoped
 overrides leave the live `DATABASE_URL` in `.env` unchanged:
@@ -167,28 +200,120 @@ uv run --no-sync python scripts/trial_daily_log.py \
   2026-10-01 --as-of 2026-10-02T05:00:00+05:30
 ```
 
-`day` selects the 05:00 IST processing window. `--as-of` is an exclusive,
+`processing_day` selects the 05:00 IST processing window. `--as-of` is an exclusive,
 timezone-aware review cutoff; it limits source evidence supplied to the writer.
 The runner requires the `m45_trial` database/login, uses the configured model,
 and loads the previous daily log before generating its replacement. It commits
-the narrative and exact input references together, then prints the saved revision
-and narrative. Every successful explicit invocation creates another revision,
-even with unchanged evidence; there is no transparent save-retry protocol.
+the narrative, exact input references and replacement lexical passages together,
+then runs the embedding graph for that saved revision ID. Local Ollama must be
+running with the configured embedding model installed. Transient embedding
+failures receive up to three total attempts; exhausted attempts report the saved
+revision ID while retaining its narrative and lexical passages.
+
+Each invocation that reaches the save commit creates another revision, even with
+unchanged evidence or a subsequent embedding failure. Recover embedding through
+`embed_saved_daily_log` with the reported `daily_log_revision_id`; rerunning the
+writer generates another narrative. Recovery does not call passage replacement,
+and completed vectors are skipped. There is no transparent save-retry protocol.
 Begin an evolving-day trial without a later saved log for that day, so future
 information cannot enter through the previous narrative.
+
+`processing_day` identifies the daily account; `revision_number` counts its saved
+versions. Each version also has a database `id`, referenced elsewhere as
+`daily_log_revision_id`. Earlier narratives remain stored; search passages and
+their vectors are replaced when a newer revision is indexed. Apply migrations
+before using the renamed fields below.
 
 Inspect saved revisions and their source counts:
 
 ```sh
 docker compose exec -T postgres psql -X -U m45_trial -d m45_trial \
   -v ON_ERROR_STOP=1 <<'SQL'
-SELECT r.day, r.revision, count(s.source_message_id) AS sources
+SELECT r.processing_day, r.revision_number, count(s.source_message_id) AS sources
 FROM daily_log_revisions AS r
-LEFT JOIN daily_log_revision_sources AS s ON s.revision_id = r.id
+LEFT JOIN daily_log_revision_sources AS s ON s.daily_log_revision_id = r.id
 GROUP BY r.id
-ORDER BY r.day, r.revision;
+ORDER BY r.processing_day, r.revision_number;
 SQL
 ```
+
+Inspect persisted indexing for the latest revision of the selected trial day:
+
+```sh
+docker compose exec -T postgres psql -X -U m45_trial -d m45_trial \
+  -v ON_ERROR_STOP=1 <<'SQL'
+SELECT r.id AS daily_log_revision_id,
+       r.processing_day,
+       r.revision_number,
+       count(p.id) AS passages,
+       count(p.embedding) AS embedded,
+       min(vector_dims(p.embedding)) AS dimensions,
+       min(p.embedding_config ->> 'model') AS embedding_model
+FROM daily_log_revisions AS r
+LEFT JOIN search_passages AS p ON p.daily_log_revision_id = r.id
+WHERE r.processing_day = DATE '2026-10-01'
+GROUP BY r.id
+ORDER BY r.revision_number DESC
+LIMIT 1;
+SQL
+```
+
+Successful embedding has `passages = embedded > 0`, dimensions `1024` and the
+configured embedding model. This verifies storage, not semantic search quality.
+Semantic and hybrid query helpers are implemented. `create_memory_search_tool`
+exposes hybrid search with `all`, `daily_log` or `source_messages` scope and returns
+up to five passages with references. It is intended for the dedicated retriever;
+live conversational retrieval integration remains pending.
+
+Index the eligible source conversations already copied into the trial database:
+
+```sh
+DATABASE_URL=postgresql+psycopg://m45_trial:m45_trial@127.0.0.1:5432/m45_trial \
+LANGSMITH_TRACING=false \
+uv run --no-sync python scripts/index_trial_sources.py
+```
+
+This runner requires the trial database/login and local Ollama. It refreshes each
+conversation's derived passages, retaining unchanged vectors, then embeds only
+missing vectors with up to three attempts for transient failures. A failed embedding
+step leaves lexical passages available; rerunning recovers missing vectors without
+re-embedding unchanged passages. Zero missing vectors filled is expected on an
+unchanged rerun. The runner neither copies source messages nor enables live indexing.
+
+Search hits retain references for explicit reading. The canonical readers return
+one original message or current daily log in bounded pages, with continuation
+offsets; they do not automatically expand every hit into its entire conversation.
+The `read_source_message` and `read_daily_log` tools expose these readers to the
+dedicated retriever and require no embedding service.
+The `browse_daily_logs` tool discovers latest logs by processing-day range;
+`browse_source_conversation` returns neighboring messages around a source-message
+ID within its conversation. Both return up to ten 300-character previews with
+continuation information. Full text uses the read tools. These capabilities are
+implemented but are not yet connected to the conversational agent.
+
+Run the standalone retriever against the same isolated trial corpus:
+
+```sh
+DATABASE_URL=postgresql+psycopg://m45_trial:m45_trial@127.0.0.1:5432/m45_trial \
+LANGSMITH_TRACING=false \
+uv run --no-sync python scripts/trial_retrieval.py \
+  "What phone was I considering buying?"
+```
+
+The runner requires the trial database/login and the configured chat provider.
+Search also needs local Ollama embeddings. It supplies current daily orientation
+and starts a fresh conversation containing only the question; it does not load
+Discord or Agent Chat UI checkpoints. It prints selected context notes with
+canonical references and material limitations, without saving messages, logs or
+checkpoints. The first real trial recovered the expected phone-purchase context;
+this does not establish general retrieval accuracy.
+
+Retrieval has six model calls, ten total tool calls including structured formatting,
+and a 32,000-token estimated envelope with 4,000 reserved for output. The reserve is
+budget accounting, not a provider-enforced output cap. Oversized input fails
+explicitly; known call-limit exhaustion returns an incomplete-context result, and
+failed tools remain visible in limitations. Live conversational integration is
+the next increment; this command does not activate it.
 
 ## Local Agent Server
 
@@ -365,6 +490,8 @@ single-user Discord DM adapter are the currently verified interaction surfaces.
 | `scripts/check.sh` | Canonical local and CI verification workflow. | Local and CI checks no longer share one entry point. |
 | `scripts/dev.sh` | Canonical local Agent Server launcher with tracing and CLI analytics disabled. | Developers must reconstruct the correct privacy-preserving server command. |
 | `scripts/trial_daily_log.py` | Manual daily writer against copied evidence in the isolated trial database. | The reusable terminal path for generating and inspecting saved trial revisions is lost. |
+| `scripts/index_trial_sources.py` | Refreshes copied source-conversation passages and fills missing vectors in the trial database. | The reusable source-indexing trial and recovery command is lost. |
+| `scripts/trial_retrieval.py` | Runs read-only, bounded adaptive retrieval against copied trial evidence. | The reusable terminal path for inspecting selected evidence and limitations is lost. |
 | `.github/workflows/check.yml` | Runs the canonical checks on pushes and pull requests. | Automated repository checks stop. |
 | `langgraph.json` | Declares the Python runtime and exposes the compiled `m45` graph to Agent Server. | The CLI cannot discover or serve the graph. |
 | `pyproject.toml` | Project metadata, dependencies, and Python tool configuration. | uv and the configured development tools lose their project definition. |
