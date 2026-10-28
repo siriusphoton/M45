@@ -19,9 +19,10 @@ from pydantic import SecretStr
 from sqlalchemy import Engine
 
 from m45.agent_middleware import (
+    REQUEST_CONTEXT_TOOL_NAME,
     CurrentTimeMiddleware,
     InteractionInstructionsMiddleware,
-    PersonalContextMiddleware,
+    MemoryContextMiddleware,
     SourceHistoryMiddleware,
     StripResponseTimestampMiddleware,
 )
@@ -35,6 +36,14 @@ from m45.interaction_instructions import DEFAULT_INTERACTION_INSTRUCTIONS
 from m45.interaction_instructions_tool import (
     UPDATE_INTERACTION_INSTRUCTIONS_TOOL_NAME,
     create_interaction_update_tool,
+)
+from m45.retrieval import create_memory_retriever
+from m45.retrieval_tools import (
+    create_daily_log_browse_tool,
+    create_daily_log_read_tool,
+    create_memory_search_tool,
+    create_source_conversation_browse_tool,
+    create_source_message_read_tool,
 )
 from m45.web_search import WEB_SEARCH_TOOL_NAME, create_ollama_web_search_tool
 
@@ -125,6 +134,16 @@ def create_configured_chat_model(settings: Settings) -> BaseChatModel:
 
 def create_application_agent(settings: Settings, engine: Engine) -> AgentGraph:
     model = create_configured_chat_model(settings)
+    retriever = create_memory_retriever(
+        model,
+        [
+            create_memory_search_tool(engine, settings),
+            create_source_message_read_tool(engine),
+            create_daily_log_read_tool(engine),
+            create_daily_log_browse_tool(engine),
+            create_source_conversation_browse_tool(engine),
+        ],
+    )
     search_api_key = _required_secret(
         settings.ollama_api_key,
         "OLLAMA_API_KEY",
@@ -140,37 +159,46 @@ def create_application_agent(settings: Settings, engine: Engine) -> AgentGraph:
             exit_behavior="end",
         ),
     )
+    context_call_limit = cast(
+        "AgentMiddleware[AgentState[Any], InteractionContext, Any]",
+        ToolCallLimitMiddleware[Any, InteractionContext](
+            tool_name=REQUEST_CONTEXT_TOOL_NAME,
+            run_limit=1,
+            exit_behavior="continue",
+        ),
+    )
+    middleware: list[AgentMiddleware[Any, InteractionContext, Any]] = [
+        SourceHistoryMiddleware(engine, source=AGENT_CHAT_UI_SOURCE),
+        StripResponseTimestampMiddleware(),
+        search_call_limit,
+        context_call_limit,
+        ToolRetryMiddleware[Any, InteractionContext](
+            max_retries=1,
+            tools=[WEB_SEARCH_TOOL_NAME],
+            on_failure=_web_search_failure_message,
+        ),
+        InteractionInstructionsMiddleware(engine),
+        HumanInTheLoopMiddleware(
+            interrupt_on={
+                UPDATE_INTERACTION_INSTRUCTIONS_TOOL_NAME: {
+                    "allowed_decisions": ["approve", "edit", "reject"],
+                }
+            },
+            description_prefix="Review standing interaction guidance update",
+        ),
+        CurrentTimeMiddleware(),
+        MemoryContextMiddleware(
+            engine,
+            retriever,
+            source=AGENT_CHAT_UI_SOURCE,
+            eligible_sources=(AGENT_CHAT_UI_SOURCE, DISCORD_SOURCE),
+        ),
+    ]
     return create_agent(  # pyright: ignore[reportUnknownVariableType]
         model=model,
         tools=[web_search_tool, update_instructions_tool],
         system_prompt=FIXED_SYSTEM_PROMPT,
-        middleware=[
-            SourceHistoryMiddleware(engine, source=AGENT_CHAT_UI_SOURCE),
-            StripResponseTimestampMiddleware(),
-            search_call_limit,
-            ToolRetryMiddleware[Any, InteractionContext](
-                max_retries=1,
-                tools=[WEB_SEARCH_TOOL_NAME],
-                on_failure=_web_search_failure_message,
-            ),
-            InteractionInstructionsMiddleware(engine),
-            HumanInTheLoopMiddleware(
-                interrupt_on={
-                    UPDATE_INTERACTION_INSTRUCTIONS_TOOL_NAME: {
-                        "allowed_decisions": ["approve", "edit", "reject"],
-                    }
-                },
-                description_prefix="Review standing interaction guidance update",
-            ),
-            CurrentTimeMiddleware(),
-            PersonalContextMiddleware(
-                engine,
-                source=AGENT_CHAT_UI_SOURCE,
-                eligible_sources=(AGENT_CHAT_UI_SOURCE, DISCORD_SOURCE),
-                message_limit=settings.personal_context_message_limit,
-                character_limit=settings.personal_context_character_limit,
-            ),
-        ],
+        middleware=middleware,
         context_schema=InteractionContext,
         name="m45",
     )

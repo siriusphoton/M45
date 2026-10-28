@@ -233,3 +233,38 @@ def test_retriever_stops_oversized_input_and_exhausted_runs() -> None:
     assert reads == []
     assert result.notes == [] and result.limitations
     assert "Tool call" in result.limitations[0]
+
+
+def test_incomplete_extra_retrieval_preserves_previous_evidence() -> None:
+    previous = MemoryContext(
+        notes=[
+            ContextNote(
+                text="The user considered a Galaxy S25 FE; purchase is unconfirmed.",
+                references=[EvidenceReference(kind="source_message", id=701)],
+            )
+        ],
+        limitations=["Purchase is unconfirmed."],
+    )
+    model = ToolCallingModel(
+        messages=iter(
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "MemoryContext", "args": {}, "id": f"bad-{index}"}],
+            )
+            for index in range(RETRIEVAL_MODEL_CALL_LIMIT + 1)
+        )
+    )
+    result = asyncio.run(
+        retrieve_memory(
+            create_memory_retriever(model, []),
+            messages=[HumanMessage(content="Did I buy it?")],
+            daily_context="No daily log available.",
+            focus="Find a purchase confirmation.",
+            previous_context=previous,
+        )
+    )
+    assert result.notes == previous.notes
+    assert result.limitations[0] == "Purchase is unconfirmed."
+    assert any("Model call" in limitation for limitation in result.limitations)
+    assert "Find a purchase confirmation." in model.requests[0][0].text
+    assert "Galaxy S25 FE" in model.requests[0][0].text

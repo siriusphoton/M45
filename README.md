@@ -1,28 +1,30 @@
 # m45
 
 Early implementation of a personal assistant with continuity (planned product
-name: Pleiades). The project is currently version **0.3.0**.
+name: Pleiades). The project is currently version **0.4.0**.
 
 The current increment provides PostgreSQL-backed durable source-message history,
-a configurable reader for recent context from other conversations, and a
-LangGraph agent served through the local Agent Server. Ollama Cloud has been
-verified through Agent Chat UI, including recall across two separate threads and
+daily-log revisions, evidence search and a LangGraph agent served through the local
+Agent Server. Ollama Cloud has been verified through Agent Chat UI, including
+recall across two separate threads and
 the corresponding durable source rows. A single-user Discord DM adapter now calls
 the same private Agent Server and has been verified with complete live turns.
 Recall has also been verified in both directions between Discord and a separate
-Agent Chat UI thread. Native agent middleware captures each completed turn and
-supplies recent cross-conversation context without adding it to checkpointed
-messages. The same model-call boundary supplies the current date and time in
-India and capture times for active messages without persisting them in agent
+Agent Chat UI thread. The newly integrated retrieval path prepares daily orientation
+and selected evidence before Pleiades responds. These are separate checkpointed
+fields, injected into model requests without adding them to conversation messages.
+Live UI verification of this new path is pending. The model-call boundary supplies
+the current date and time in India and capture times for active messages without persisting them in agent
 state. The agent can use Ollama Web Search for current external information while
 retaining tool exchanges in checkpoint state rather than durable source history.
 It removes an echoed leading IST timestamp from final assistant replies before
 they are saved; the raw prefix may briefly appear while Agent Chat UI streams.
 
-A manual daily writer generates and saves versioned narratives from copied source
-history in an isolated trial database. Revisions retain their exact input references
-and can be inspected independently of live conversations. The runner commits the
-revision and lexical passages together, then attempts local embedding with bounded
+A manual daily writer generates and saves versioned narratives from live source
+history; a separate historical entry point uses the isolated trial database.
+Revisions retain their exact input references and can be inspected independently
+of live conversations. The runner commits the revision and lexical passages
+together, then attempts local embedding with bounded
 retries. An embedding failure leaves the saved narrative and lexical search intact.
 
 ## Local setup
@@ -72,8 +74,9 @@ also stored all six passages of the 1 October log's second revision as
 implemented, and the first trial query found the relevant phone-purchase passage.
 Hybrid search combines lexical and semantic rankings by passage ID. The isolated
 trial also retrieves original conversation passages alongside daily-log passages.
-Conversational retrieval is not wired yet, so ordinary chat does not require that
-local service.
+The conversational retriever now has these tools. Its hybrid search tool requires
+the local embedding service; canonical reads and browsing work without embeddings.
+Search-tool failures are reported in retrieval limitations.
 
 ### Development source-history maintenance
 
@@ -262,8 +265,8 @@ Successful embedding has `passages = embedded > 0`, dimensions `1024` and the
 configured embedding model. This verifies storage, not semantic search quality.
 Semantic and hybrid query helpers are implemented. `create_memory_search_tool`
 exposes hybrid search with `all`, `daily_log` or `source_messages` scope and returns
-up to five passages with references. It is intended for the dedicated retriever;
-live conversational retrieval integration remains pending.
+up to five passages with references. The dedicated conversational retriever uses
+this tool alongside canonical reads and browsing.
 
 Index the eligible source conversations already copied into the trial database:
 
@@ -289,7 +292,7 @@ The `browse_daily_logs` tool discovers latest logs by processing-day range;
 `browse_source_conversation` returns neighboring messages around a source-message
 ID within its conversation. Both return up to ten 300-character previews with
 continuation information. Full text uses the read tools. These capabilities are
-implemented but are not yet connected to the conversational agent.
+connected to the conversational retriever.
 
 Run the standalone retriever against the same isolated trial corpus:
 
@@ -312,8 +315,51 @@ Retrieval has six model calls, ten total tool calls including structured formatt
 and a 32,000-token estimated envelope with 4,000 reserved for output. The reserve is
 budget accounting, not a provider-enforced output cap. Oversized input fails
 explicitly; known call-limit exhaustion returns an incomplete-context result, and
-failed tools remain visible in limitations. Live conversational integration is
-the next increment; this command does not activate it.
+failed tools remain visible in limitations. The conversational factory also wires
+this workflow into chat; this isolated command does not use live checkpoints.
+
+Each new conversational input prepares the current and previous processing days'
+latest logs plus uncovered source messages, excluding messages already in the active
+conversation. A missing log is explicit, not evidence of an empty day. The retriever
+receives the whole active conversation and this orientation, then supplies selected
+notes, references and limitations. Pleiades may request one further focused pass.
+Orientation and selected context survive review pauses and are replaced on new input.
+
+The main model has its own estimated 32,000-token envelope with 4,000 reserved for
+output, checked after transient instructions, time, evidence and tools are assembled.
+Unexpected retrieval failures or oversized input fail the turn visibly. No compaction
+or silent trimming is active. Retrieval initially inherits the parent run's nested
+stream/checkpoint configuration; isolation is deferred until after the first hosted
+UI observation. Internal retrieval events may therefore be visible during streaming.
+
+### Manual live evidence preparation
+
+Use the live `m45` database/login in `.env` for these commands. Refresh searchable
+source passages and fill missing embeddings across retained Agent Chat UI/Discord
+conversations:
+
+```sh
+LANGSMITH_TRACING=false uv run --no-sync python scripts/index_sources.py
+```
+
+Unchanged vectors are reused on rerun. Source capture does not automatically run
+this indexer; refresh it manually after later exchanges until scheduling is added.
+
+Write fresh live logs for the previous and current processing days:
+
+```sh
+LANGSMITH_TRACING=false uv run --no-sync python scripts/write_daily_log.py
+```
+
+One current IST cutoff is used for both days, with the existing 05:00 boundary.
+Days without eligible source messages are skipped without model calls or blank
+records. Each day that reaches the save commit creates a revision, even if rerun
+with unchanged evidence. Embedding failure leaves the narrative and lexical index
+saved; recover vectors for the reported revision instead of regenerating the log.
+The trial command above delegates to the same writer while requiring its isolated
+database/login and explicit historical date/cutoff. No trial artifacts are copied
+into live storage. These commands prepare evidence for the integrated conversational
+retriever. Scheduling and live UI verification remain pending.
 
 ## Local Agent Server
 
@@ -422,31 +468,35 @@ alongside attribution errors, omitted corrections and repeated details. The logs
 remain derived accounts whose original source evidence is retained for inspection.
 Daily-log revisions retain their exact input source IDs in a separate linking
 table. The load/save functions preserve earlier versions, reject stale saves and
-flush narrative plus references in the caller's transaction. They are not yet
-connected to a scheduler or conversational context injection.
+flush narrative plus references in the caller's transaction. Latest saved logs enter
+conversational orientation; generation remains manually triggered.
 
 `load_recent_personal_context` selects whole user and assistant messages from
 explicitly eligible sources, excludes the current source conversation, and
 applies configurable message and character limits. It returns the selected
-window in chronological order. Setting either limit to `0` disables that limit.
+window in chronological order. This reader and `PersonalContextMiddleware` remain
+as legacy code but are no longer used by the conversational factory; their message
+and character settings no longer control live context.
 
 `SourceHistoryMiddleware` commits the submitted user message before model
 invocation and the completed assistant message before the graph returns. It uses
-the LangGraph thread ID as the source conversation identity and requires stable
-message IDs. Exact re-execution remains safe through the source-history
+the runtime interaction identity when supplied (Discord source/channel), otherwise
+the Agent Chat UI source and LangGraph thread ID. It requires stable message IDs.
+Exact re-execution remains safe through the source-history
 idempotency contract. For each model call, it also labels source-backed thread
 messages with their IST capture times in the model request only; neither the
 checkpointed messages nor the durable source content changes.
 
-`PersonalContextMiddleware` loads the configured window at the model-call boundary,
-formats it as a role-labelled transcript with source, synthetic conversation
-labels, and capture times in IST, then adds it to that model request's system
-message. Capture times do not establish when the described events happened. The
-injected transcript is not added to agent state or checkpoint history; raw
-source IDs remain database provenance rather than prompt content.
+`MemoryContextMiddleware` prepares daily orientation and retrieval once per new
+input, checkpoints the selected context separately, and injects it into transient
+model requests. The retriever receives capture-time-labelled copies of active
+messages using the same formatter as Pleiades; stored text remains unchanged.
+Capture times do not establish when the described events happened. The middleware
+also exposes the bounded `request_context` tool and checks the fully assembled main
+model input. It must remain last in the model middleware list for that accounting.
 
 `CurrentTimeMiddleware` computes the current date and time in `Asia/Kolkata` for
-each model call and adds it transiently to the system message before personal
+each model call and adds it transiently to the system message before memory
 context. This value is neither added to agent state nor saved in checkpoints.
 
 `InteractionInstructionsMiddleware` adds the latest standing interaction
@@ -489,7 +539,9 @@ single-user Discord DM adapter are the currently verified interaction surfaces.
 | `tests/` | Tests for source identity, daily-log boundaries/revisions, recent-context selection and formatting, middleware boundaries, deterministic agent behavior, and provider credential validation. | Persistence, context-selection, model-input, checkpoint, source-capture, and graph-runtime contracts lose automated verification. |
 | `scripts/check.sh` | Canonical local and CI verification workflow. | Local and CI checks no longer share one entry point. |
 | `scripts/dev.sh` | Canonical local Agent Server launcher with tracing and CLI analytics disabled. | Developers must reconstruct the correct privacy-preserving server command. |
-| `scripts/trial_daily_log.py` | Manual daily writer against copied evidence in the isolated trial database. | The reusable terminal path for generating and inspecting saved trial revisions is lost. |
+| `scripts/write_daily_log.py` | Shared manual write/save/index workflow and live entry point for the previous/current processing days. | Manual live writing and the trial writer's shared implementation are lost. |
+| `scripts/trial_daily_log.py` | Historical date/cutoff entry point that pins the shared writer to the isolated trial database. | The existing historical-trial command is lost. |
+| `scripts/index_sources.py` | Refreshes retained live source passages and fills missing vectors. | Live evidence cannot be refreshed through its manual entry point. |
 | `scripts/index_trial_sources.py` | Refreshes copied source-conversation passages and fills missing vectors in the trial database. | The reusable source-indexing trial and recovery command is lost. |
 | `scripts/trial_retrieval.py` | Runs read-only, bounded adaptive retrieval against copied trial evidence. | The reusable terminal path for inspecting selected evidence and limitations is lost. |
 | `.github/workflows/check.yml` | Runs the canonical checks on pushes and pull requests. | Automated repository checks stop. |
